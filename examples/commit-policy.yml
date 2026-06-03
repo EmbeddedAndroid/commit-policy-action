@@ -1,0 +1,30 @@
+# Example caller. Copy to .github/workflows/commit-policy.yml in a layer repo.
+#
+# pull_request_target runs in the base-repository context with a writable
+# token, so the review can be posted on pull requests from forks. The reused
+# workflow never checks out or runs the pull request's code.
+name: Commit Policy
+run-name: "Commit policy: ${{ github.event.pull_request.title }}"
+
+on:
+  pull_request_target:
+    branches:
+      - master
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: commit-policy-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  commit-policy:
+    uses: EmbeddedAndroid/commit-policy-action/.github/workflows/commit-policy.yml@v1
+    with:
+      # Pin the checker to the same release for reproducibility.
+      action-ref: v1
+      # Component prefixes that look like Conventional Commits types but are
+      # legitimate in this layer (meta-qcom uses "ci:").
+      cc-allow-components: "ci"

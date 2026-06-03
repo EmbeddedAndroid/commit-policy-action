@@ -1,0 +1,87 @@
+name: Commit Policy
+
+# Reusable workflow that reviews a pull request's commits against an
+# OpenEmbedded / Yocto layer contribution policy and posts the result as a
+# review. Call it from a repo with a small pull_request_target caller (see
+# examples/commit-policy.yml). It needs no checkout of the reviewed repo:
+# the checker reads the pull request through the GitHub API.
+
+on:
+  workflow_call:
+    inputs:
+      action-ref:
+        description: "Ref of commit-policy-action to run; pin to a tag or sha."
+        type: string
+        default: "main"
+      cc-allow-components:
+        description: "Comma list of component prefixes allowed despite matching a Conventional Commits type."
+        type: string
+        default: "ci"
+      subject-max-length:
+        description: "Soft subject-length warning threshold."
+        type: string
+        default: "80"
+      valid-upstream-status:
+        description: "Comma list of accepted Upstream-Status values."
+        type: string
+        default: "submitted,backport,pending,inappropriate,denied,accepted,inactive-upstream"
+      disable-rules:
+        description: "Comma list of rule ids to skip."
+        type: string
+        default: ""
+      guidelines:
+        description: "Doc name cited in the review body."
+        type: string
+        default: "AGENTS.md"
+      patch-check:
+        description: "Check Upstream-Status on added patch files."
+        type: boolean
+        default: true
+      post-review:
+        description: "Post the result to the pull request as a review."
+        type: boolean
+        default: true
+      approve-on-pass:
+        description: "Submit an APPROVE review when there are no issues."
+        type: boolean
+        default: false
+      fail-on-error:
+        description: "Fail the job when a blocking issue is found."
+        type: boolean
+        default: true
+
+jobs:
+  commit-policy:
+    name: "Check commit policy"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      # Only the trusted action code is checked out. The reviewed pull
+      # request is read through the API, never executed.
+      - name: Check out commit-policy-action
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: EmbeddedAndroid/commit-policy-action
+          ref: ${{ inputs.action-ref }}
+          persist-credentials: false
+
+      - name: Review commit policy
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 commit_policy_check.py \
+            --api \
+            --repo "${{ github.repository }}" \
+            --pr "${{ github.event.pull_request.number }}" \
+            --head-sha "${{ github.event.pull_request.head.sha }}" \
+            --cc-allow-components "${{ inputs.cc-allow-components }}" \
+            --subject-max-length "${{ inputs.subject-max-length }}" \
+            --valid-upstream-status "${{ inputs.valid-upstream-status }}" \
+            --disable-rules "${{ inputs.disable-rules }}" \
+            --guidelines "${{ inputs.guidelines }}" \
+            --patch-check "${{ inputs.patch-check }}" \
+            --post-review "${{ inputs.post-review }}" \
+            --approve-on-pass "${{ inputs.approve-on-pass }}" \
+            --fail-on-error "${{ inputs.fail-on-error }}"
