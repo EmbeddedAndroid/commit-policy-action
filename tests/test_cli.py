@@ -1,0 +1,188 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# Tests for the interactive review CLI helpers. These lock the bugs found
+# while using the tool: a list position being mistaken for a PR number (which
+# caused a 404, a cache miss / slow re-fetch, and the wrong review with no
+# warning shown), and the clickable-URL handling.
+
+import os
+import sys
+
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import commit_policy_check as cp  # noqa: E402
+
+
+# --------------------------------------------------------------------------
+# resolve_choice: list position vs explicit PR number (the headline bug).
+# --------------------------------------------------------------------------
+
+# Display order: list positions 1..4 map to these PR numbers.
+ORDER = [2347, 2348, 2251, 2346]
+
+
+def test_bare_number_is_a_list_position_not_a_pr_number():
+    # Typing "4" must open the PR at position 4 (#2346), NOT PR #4.
+    assert cp.resolve_choice("4", ORDER) == ("review", 2346)
+    assert cp.resolve_choice("1", ORDER) == ("review", 2347)
+
+
+def test_hash_number_is_an_explicit_pr_number():
+    # "#2346" is the PR number even though 2346 is not a list position.
+    assert cp.resolve_choice("#2346", ORDER) == ("review", 2346)
+    # "#4" is PR #4, not list position 4.
+    assert cp.resolve_choice("#4", ORDER) == ("review", 4)
+
+
+def test_bare_out_of_range_number_is_a_pr_number():
+    # 2334 is past the end of the list, so it is treated as a PR number.
+    assert cp.resolve_choice("2334", ORDER) == ("review", 2334)
+
+
+def test_position_resolves_to_cached_pr_no_refetch():
+    # The bug also made reviews slow: a position missed the cache and
+    # re-fetched. With the fix the position resolves to the cached PR number.
+    warn = cp.Finding(rule="subject-too-long", severity="warning",
+                      message="too long", commit="abc123")
+    cache = {2346: ({"title": "x"}, "ok", [warn])}
+    _, pr = cp.resolve_choice("4", ORDER)        # position 4 -> #2346
+    assert pr in cache and cache[pr][1] == "ok"   # cache hit, no network
+    assert cache[pr][2] == [warn]                 # the warning is present
+
+
+def test_navigation_words():
+    assert cp.resolve_choice("", ORDER) == ("more",)
+    assert cp.resolve_choice("q", ORDER)[0] == "quit"
+    assert cp.resolve_choice("quit", ORDER)[0] == "quit"
+    assert cp.resolve_choice("r", ORDER)[0] == "refresh"
+    assert cp.resolve_choice("  refresh ", ORDER)[0] == "refresh"
+
+
+def test_garbage_is_an_error_not_a_review():
+    assert cp.resolve_choice("foo", ORDER)[0] == "error"
+    assert cp.resolve_choice("12abc", ORDER)[0] == "error"
+
+
+def test_empty_order_falls_back_to_pr_number():
+    assert cp.resolve_choice("5", []) == ("review", 5)
+
+
+# --------------------------------------------------------------------------
+# The review view must show warnings (not only errors).
+# --------------------------------------------------------------------------
+
+def _meta():
+    return {"title": "ci: do a thing", "user": {"login": "someone"}}
+
+
+def test_review_view_shows_a_warning(capsys):
+    warn = cp.Finding(rule="subject-too-long", severity="warning",
+                      message="Subject is 82 characters; keep it short.",
+                      commit="abc123def456",
+                      subject="ci: do a thing")
+    cp.render_cli_review("qualcomm-linux", "meta-qcom", 2346, _meta(), [warn])
+    out = capsys.readouterr().out
+    assert "COMMENT" in out                       # verdict for warning-only
+    assert "subject-too-long" in out              # the warning is rendered
+    assert "1 warning" in out
+
+
+def test_review_view_shows_an_error(capsys):
+    err = cp.Finding(rule="kernel-prefix", severity="error",
+                     message="Drop the kernel-tree prefix.",
+                     commit="abc123def456", subject="FROMLIST: x")
+    cp.render_cli_review("qualcomm-linux", "meta-qcom", 5, _meta(), [err])
+    out = capsys.readouterr().out
+    assert "REQUEST CHANGES" in out
+    assert "kernel-prefix" in out
+
+
+# --------------------------------------------------------------------------
+# At-a-glance tags.
+# --------------------------------------------------------------------------
+
+def test_pr_tag_labels():
+    err = cp.Finding(rule="x", severity="error", message="m")
+    warn = cp.Finding(rule="y", severity="warning", message="m")
+    assert "[ok]" in cp._pr_tag("ok", [])
+    assert "[warn 1]" in cp._pr_tag("ok", [warn])
+    assert "[err 2]" in cp._pr_tag("ok", [err, err])
+    assert "[err 1]" in cp._pr_tag("ok", [err, warn])   # error wins over warn
+    assert "[?]" in cp._pr_tag("err", None)             # could not check
+
+
+# --------------------------------------------------------------------------
+# Clickable URLs (OSC 8 hyperlinks).
+# --------------------------------------------------------------------------
+
+class _FakeTTY:
+    def __init__(self, tty):
+        self._tty = tty
+
+    def isatty(self):
+        return self._tty
+
+
+def test_link_emits_osc8_on_a_tty(monkeypatch):
+    monkeypatch.setattr(cp.sys, "stdout", _FakeTTY(True))
+    monkeypatch.delenv("NO_HYPERLINKS", raising=False)
+    link = cp._link("https://github.com/o/r/pull/5", "click")
+    assert link == "\x1b]8;;https://github.com/o/r/pull/5\x1b\\click\x1b]8;;\x1b\\"
+
+
+def test_link_defaults_label_to_url(monkeypatch):
+    monkeypatch.setattr(cp.sys, "stdout", _FakeTTY(True))
+    monkeypatch.delenv("NO_HYPERLINKS", raising=False)
+    assert "https://x/y" in cp._link("https://x/y")
+
+
+def test_link_plain_when_not_a_tty(monkeypatch):
+    monkeypatch.setattr(cp.sys, "stdout", _FakeTTY(False))
+    assert cp._link("https://x/y", "label") == "label"
+
+
+def test_link_disabled_by_env(monkeypatch):
+    monkeypatch.setattr(cp.sys, "stdout", _FakeTTY(True))
+    monkeypatch.setenv("NO_HYPERLINKS", "1")
+    assert cp._link("https://x/y", "label") == "label"
+
+
+# --------------------------------------------------------------------------
+# URL building.
+# --------------------------------------------------------------------------
+
+def test_comment_url_patch_file_anchors_the_diff_line():
+    import hashlib
+    f = cp.Finding(rule="patch-upstream-status", severity="error", message="m",
+                   path="recipes-a/b.patch", line=3)
+    url = cp.comment_url("o", "r", 5, f)
+    h = hashlib.sha256(b"recipes-a/b.patch").hexdigest()
+    assert url == f"https://github.com/o/r/pull/5/files#diff-{h}R3"
+
+
+def test_comment_url_commit_finding():
+    f = cp.Finding(rule="kernel-prefix", severity="error", message="m",
+                   commit="abc123def456")
+    assert cp.comment_url("o", "r", 5, f) == \
+        "https://github.com/o/r/pull/5/commits/abc123def456"
+
+
+@pytest.mark.parametrize("url,expected", [
+    ("https://github.com/qualcomm-linux/meta-qcom/pulls",
+     ("qualcomm-linux", "meta-qcom", None)),
+    ("https://github.com/qualcomm-linux/meta-qcom/pull/2348",
+     ("qualcomm-linux", "meta-qcom", 2348)),
+    ("https://github.com/qualcomm-linux/meta-qcom",
+     ("qualcomm-linux", "meta-qcom", None)),
+    ("https://github.com/o/r/pull/12/files",
+     ("o", "r", 12)),
+])
+def test_parse_pr_url(url, expected):
+    assert cp.parse_pr_url(url) == expected
+
+
+def test_parse_pr_url_rejects_non_github():
+    with pytest.raises(ValueError):
+        cp.parse_pr_url("https://example.com/foo/bar")

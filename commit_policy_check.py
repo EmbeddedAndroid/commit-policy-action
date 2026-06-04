@@ -837,6 +837,34 @@ def render_cli_review(owner, repo, pr, meta, findings):
         print(f"      paste: {f.message}")
 
 
+def resolve_choice(choice, order):
+    """Map a browse-prompt input to an action (pure, so it is unit-tested).
+
+    Returns one of: ("quit",), ("refresh",), ("more",),
+    ("review", pr_number), or ("error", message).
+
+    A bare in-range number is a 1-based list POSITION and resolves to the PR
+    at order[n-1] (so it hits the cache); "#NNN" - or a bare number past the
+    end of the list - is an explicit PR NUMBER.
+    """
+    c = choice.strip()
+    low = c.lower()
+    if low in ("q", "quit"):
+        return ("quit",)
+    if low in ("r", "refresh"):
+        return ("refresh",)
+    if c == "":
+        return ("more",)
+    num = c.lstrip("#")
+    if not num.isdigit():
+        return ("error", "Enter a list position, #NNN for a PR, Enter for "
+                         "more, r, or q.")
+    n = int(num)
+    if not c.startswith("#") and 1 <= n <= len(order):
+        return ("review", order[n - 1])
+    return ("review", n)
+
+
 def interactive_review(url, cfg):
     token = _token()
     try:
@@ -910,12 +938,18 @@ def interactive_review(url, cfg):
             except (EOFError, KeyboardInterrupt):
                 print()
                 return 0
-            low = choice.lower()
 
-            if low in ("q", "quit"):
+            action = resolve_choice(choice, order)
+            kind = action[0]
+
+            if kind == "quit":
                 return 0
 
-            if low in ("r", "refresh"):
+            if kind == "error":
+                print(action[1])
+                continue
+
+            if kind == "refresh":
                 cache.clear()
                 order.clear()
                 print(_style("Refreshing (most recently active first)...", "2"))
@@ -929,7 +963,7 @@ def interactive_review(url, cfg):
                 prefetch = bg.submit(load_page, page + 1)
                 continue
 
-            if choice == "":   # Enter = load more (continuous scroll)
+            if kind == "more":   # Enter = load more (continuous scroll)
                 try:
                     items, results = prefetch.result()
                 except Exception:
@@ -946,18 +980,7 @@ def interactive_review(url, cfg):
                 prefetch = bg.submit(load_page, page + 1)
                 continue
 
-            num = choice.lstrip("#")
-            if not num.isdigit():
-                print("Enter a list position, #NNN for a PR, Enter for more, "
-                      "r, or q.")
-                continue
-            n = int(num)
-            # A bare number in range is a list position (instant from cache);
-            # "#NNN" or an out-of-range number is an explicit PR number.
-            if not choice.startswith("#") and 1 <= n <= len(order):
-                review(order[n - 1])
-            else:
-                review(n)
+            review(action[1])  # kind == "review"
     finally:
         bg.shutdown(wait=False, cancel_futures=True)
 
