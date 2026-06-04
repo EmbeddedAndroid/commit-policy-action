@@ -1,0 +1,197 @@
+[
+ {
+  "id": "pr1937-fromlist",
+  "source": "PR#1937",
+  "message": "FROMLIST: arm64: dts: qcom: lemans: Enable DISPLAY-PORT\n\nAdd dailinks for audio.\n\nSigned-off-by: Kumar Anurag <kumar.singh@oss.qualcomm.com>",
+  "author_name": "Kumar Anurag",
+  "author_email": "kumar.singh@oss.qualcomm.com",
+  "expected_gate": true,
+  "note": "kernel-tree prefix"
+ },
+ {
+  "id": "pr1385-cc",
+  "source": "PR#1385",
+  "message": "feat(tflite): add comprehensive GPU optimizations\n\nBody.\n\nSigned-off-by: Tushar Darote <tdarote@qti.qualcomm.com>",
+  "author_name": "Tushar Darote",
+  "author_email": "tdarote@qti.qualcomm.com",
+  "expected_gate": true,
+  "note": "conventional commits prefix"
+ },
+ {
+  "id": "pr1951-nospace",
+  "source": "PR#1951",
+  "message": "qwes:Migrate SRC_URI for prebuilts to QArtifactory\n\nBody.\n\nSigned-off-by: Mani Sankar Javvaji <mjavvaji@qti.qualcomm.com>",
+  "author_name": "Mani Sankar Javvaji",
+  "author_email": "mjavvaji@qti.qualcomm.com",
+  "expected_gate": true,
+  "note": "missing space after colon"
+ },
+ {
+  "id": "pr1889-nosob",
+  "source": "PR#1889",
+  "message": "[fix issue 1888] by adding host checks\n\nBody explaining the fix.",
+  "author_name": null,
+  "author_email": null,
+  "expected_gate": true,
+  "note": "no Signed-off-by"
+ },
+ {
+  "id": "pr2031-malformed",
+  "source": "PR#2031",
+  "message": "Add initial support for Bluetooth Channel Sounding\n\nBody.\n\nSigned-off-by: prathibhamadugonde<prathibha.madugonde@oss.qualcomm.com>",
+  "author_name": "Prathibha Madugonde",
+  "author_email": "prathibha.madugonde@oss.qualcomm.com",
+  "expected_gate": true,
+  "note": "malformed sob (no space)"
+ },
+ {
+  "id": "pr1612-webclient",
+  "source": "PR#1612",
+  "message": "Create monitor-token-bucket.yml\n\nworkflow\n\nSigned-off-by: steve345 <7432003+steve345@users.noreply.github.com>",
+  "author_name": "steve345",
+  "author_email": "7432003+steve345@users.noreply.github.com",
+  "expected_gate": true,
+  "note": "numbered noreply identity"
+ },
+ {
+  "id": "pr2189-webclient",
+  "source": "PR#2189",
+  "message": "sensors: upgrade iqx7181 registry files\n\nSigned-off-by: wayi-art <82081381+wayi-art@users.noreply.github.com>",
+  "author_name": "wayi-art",
+  "author_email": "82081381+wayi-art@users.noreply.github.com",
+  "expected_gate": true,
+  "note": "numbered noreply identity"
+ },
+ {
+  "id": "docs-cc",
+  "source": "synthetic",
+  "message": "docs: reword the agent guide introduction\n\nBody.\n\nSigned-off-by: Dev <dev@oss.qualcomm.com>",
+  "author_name": "Dev",
+  "author_email": "dev@oss.qualcomm.com",
+  "expected_gate": true,
+  "note": "CC type docs"
+ },
+ {
+  "id": "fromlist-lower",
+  "source": "synthetic",
+  "message": "fromlist: lower-case kernel prefix\n\nBody.\n\nSigned-off-by: Dev <dev@oss.qualcomm.com>",
+  "author_name": "Dev",
+  "author_email": "dev@oss.qualcomm.com",
+  "expected_gate": true,
+  "note": "lower-case kernel prefix"
+ },
+ {
+  "id": "cap-component",
+  "source": "synthetic",
+  "message": "Weston: enable RDP and screenshare\n\nBody.\n\nSigned-off-by: Dev <dev@oss.qualcomm.com>",
+  "author_name": "Dev",
+  "author_email": "dev@oss.qualcomm.com",
+  "expected_gate": true,
+  "note": "capitalised component"
+ },
+ {
+  "id": "merge",
+  "source": "synthetic",
+  "message": "Merge branch 'master' into feature\n\nSigned-off-by: Dev <dev@oss.qualcomm.com>",
+  "author_name": "Dev",
+  "author_email": "dev@oss.qualcomm.com",
+  "expected_gate": true,
+  "note": "merge commit",
+  "parents": [
+   "p1",
+   "p2"
+  ]
+ },
+ {
+  "id": "pr2252-good",
+  "source": "PR#2252",
+  "message": "linux-yocto-dev: enable loading of compressed firmware\n\nCI uses compressed firmware; enable the Kconfig options.\n\nSigned-off-by: Dmitry Baryshkov <dmitry.baryshkov@oss.qualcomm.com>",
+  "author_name": "Dmitry Baryshkov",
+  "author_email": "dmitry.baryshkov@oss.qualcomm.com",
+  "expected_gate": false,
+  "note": "compliant"
+ },
+ {
+  "id": "pr2253-good",
+  "source": "PR#2253",
+  "message": "ci/qcom-distro: fix building MariaDB for Glymur\n\nAssembler error; bump the arch clause.\n\nSigned-off-by: Dmitry Baryshkov <dmitry.baryshkov@oss.qualcomm.com>",
+  "author_name": "Dmitry Baryshkov",
+  "author_email": "dmitry.baryshkov@oss.qualcomm.com",
+  "expected_gate": false,
+  "note": "compliant, slash component"
+ },
+ {
+  "id": "pr2227-good",
+  "source": "PR#2227",
+  "message": "tqftpserv: upgrade 1.1.1 -> 1.2\n\nProtocol fixes.\n\nSigned-off-by: Dmitry Baryshkov <dmitry.baryshkov@oss.qualcomm.com>",
+  "author_name": "Dmitry Baryshkov",
+  "author_email": "dmitry.baryshkov@oss.qualcomm.com",
+  "expected_gate": false,
+  "note": "compliant upgrade"
+ },
+ {
+  "id": "ci-allowed",
+  "source": "synthetic",
+  "message": "ci: base.lock: update meta-openembedded\n\nBody.\n\nSigned-off-by: Dev <dev@oss.qualcomm.com>",
+  "author_name": "Dev",
+  "author_email": "dev@oss.qualcomm.com",
+  "expected_gate": false,
+  "note": "ci is an allowed component"
+ },
+ {
+  "id": "bare-imperative",
+  "source": "PR#2159",
+  "message": "Drop SoC version suffixes from FIT DTB compatible strings (#2159)\n\nBody.\n\nSigned-off-by: Dev <dev@oss.qualcomm.com>",
+  "author_name": "Dev",
+  "author_email": "dev@oss.qualcomm.com",
+  "expected_gate": false,
+  "note": "valid bare imperative"
+ },
+ {
+  "id": "revert-colon",
+  "source": "synthetic",
+  "message": "Revert \"weston: enable RDP and screenshare\"\n\nBody.\n\nSigned-off-by: Dev <dev@oss.qualcomm.com>",
+  "author_name": "Dev",
+  "author_email": "dev@oss.qualcomm.com",
+  "expected_gate": false,
+  "note": "bare imperative whose summary contains a colon"
+ },
+ {
+  "id": "pr2074-semantic",
+  "source": "PR#2074",
+  "message": "camxcommon-headers: Update to the 1.0.6 revision\n\nupdate headers files.\n\nSigned-off-by: Ganesh Khose <gkhose@qti.qualcomm.com>",
+  "author_name": "Ganesh Khose",
+  "author_email": "gkhose@qti.qualcomm.com",
+  "expected_gate": false,
+  "note": "weak body is a semantic issue, not gated"
+ },
+ {
+  "id": "forged-cotrailer",
+  "source": "synthetic",
+  "message": "linux-qcom: enable demo node\n\nBody.\n\nSigned-off-by: Dev <dev@oss.qualcomm.com>\nAcked-by: Linus Torvalds <torvalds@kernel.org>",
+  "author_name": "Dev",
+  "author_email": "dev@oss.qualcomm.com",
+  "expected_gate": false,
+  "note": "forged Acked-by is a warning, not a gate"
+ },
+ {
+  "id": "webedit-realmail",
+  "source": "synthetic",
+  "message": "Update Kconfig\n\nBody.\n\nSigned-off-by: Dev <dev@oss.qualcomm.com>",
+  "author_name": "Dev",
+  "author_email": "dev@oss.qualcomm.com",
+  "expected_gate": false,
+  "note": "web-edit subject with real email is advisory"
+ },
+ {
+  "id": "identity-spoof",
+  "source": "synthetic",
+  "message": "qcom-distro: spoof authorship\n\nBody.\n\nSigned-off-by: Bjorn Andersson <andersson@kernel.org>",
+  "author_name": "Bjorn Andersson",
+  "author_email": "andersson@kernel.org",
+  "expected_gate": false,
+  "note": "author-not-submitter is a warning",
+  "author_login": "andersson",
+  "pr_author": "EmbeddedAndroid"
+ }
+]

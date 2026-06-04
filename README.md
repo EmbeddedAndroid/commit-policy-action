@@ -11,30 +11,43 @@ same review pattern (for example the `qualcomm-linux` Yocto layers).
 
 ## What it checks
 
-Blocking (the review requests changes and the job fails):
+The rules split into a **gate** (decidable from the commit text plus an
+external anchor; these block) and **advisory** warnings (things a deterministic
+tool cannot prove; surfaced for a human, never block).
+
+Gate (review requests changes, job fails):
 
 | Rule | What it catches |
 |------|-----------------|
-| `kernel-prefix` | `FROMLIST:` / `UPSTREAM:` / `BACKPORT:` / `FROMGIT:` subjects (any case, with or without a space before the colon) |
 | `conventional-commit` | Conventional Commits subjects (`feat:`, `fix(scope):`, `feat (scope):`, `docs:`, ...) |
-| `component-colon-space` | `component:summary` missing the space after the colon |
-| `webedit-subject` | GitHub web-editor subjects (`Create file.yml`, `Update Kconfig`, `... files via upload`) |
-| `fixup-commit` | `fixup!` / `squash!` / `WIP` commits left in the series |
-| `merge-commit` | merge commits in the series (rebase instead) |
+| `kernel-prefix` | `FROMLIST:` / `UPSTREAM:` / `BACKPORT:` / `FROMGIT:` (any case/spacing) |
+| `invalid-component-prefix` | a prefix that is not a canonical `lowercase-component: summary` (capitalised, missing space after the colon, stray punctuation) |
+| `fixup-commit` | `fixup!` / `squash!` / `WIP` commits |
+| `merge-commit` | merge commits in the series |
 | `signoff-missing` / `signoff-malformed` / `signoff-author-mismatch` | missing, malformed, or non-author Signed-off-by |
 | `identity-webclient` | numbered `NNNN+user@users.noreply.github.com` identities |
 | `patch-upstream-status` | added `.patch` files with a missing or invalid `Upstream-Status` value |
 
-Advisory (warnings; surfaced but do not fail the job):
+Advisory (warnings; surfaced, never block):
 
-`subject-too-long`, `body-empty`, `identity-noreply`, `signoff-name-mismatch`,
-and `unverified-cotrailer` (a `Signed-off-by` / `Acked-by` / `Reviewed-by` /
-`Co-authored-by` / ... for someone other than the author or committer, which a
-maintainer must confirm).
+`subject-too-long`, `webedit-subject` (auto-generated web-editor subject),
+`body-empty`, `identity-noreply`, `signoff-name-mismatch`, `author-not-submitter`
+(commit authored by a GitHub account other than the PR submitter),
+`unverified-cotrailer` (a `*-by:` trailer for someone other than the author or
+committer), `patch-unfetched`, and `pr-too-large`.
+
+Two design choices keep the gate from turning into whack-a-mole. Subject prefix
+rules normalise whitespace and case once, then check the *positive* canonical
+shape rather than blacklisting bad variants - so an unseen decorated variant is
+simply "not the good shape." Identity is anchored to the GitHub-verified
+`author.login` (API mode) rather than the attacker-controlled commit text.
+Coverage is held by unit fixtures, property-based fuzzing
+(`tests/test_fuzz.py`), and a labelled-corpus precision/recall gate
+(`corpus_eval.py`, `tests/test_corpus.py`) - so "did it converge" is a number,
+not "did a red-teamer find another string."
 
 Semantic judgements - whether the body explains why, whether the subject
-truthfully describes the diff, whether unrelated changes are bundled - are left
-to human review.
+truthfully describes the diff - remain human review.
 
 ## Usage
 

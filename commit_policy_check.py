@@ -128,15 +128,21 @@ CC_TYPE_RE = re.compile(
     r"^(feat|fix|chore|refactor|perf|style|docs|build|test|revert|ci)\s*!?\s*:",
     re.IGNORECASE)
 
-# Kernel-tree subject prefixes, which OE layers do not use. Case-insensitive
-# and tolerant of whitespace before the colon so "Fromlist:" / "UPSTREAM :"
-# cannot slip past.
+# Kernel-tree subject prefixes, which OE layers do not use. A small closed
+# vocabulary, like the Conventional Commits types: these look like valid
+# components but are not, so they cannot be decided by shape alone. Open-ended
+# case/whitespace variants are folded away by normalize_subject() first.
 KERNEL_PREFIX_RE = re.compile(
     r"^(FROMLIST|FROMGIT|UPSTREAM|BACKPORT)\s*:", re.IGNORECASE)
 
-# A component prefix whose colon is not followed by a space. The negative
-# lookahead for "/" avoids flagging a leading URL.
-COLON_SPACE_RE = re.compile(r"^[\w][\w.+/-]*:(?!/)\S")
+# A "prefix attempt": a non-space, non-colon run immediately followed by a
+# colon at the start of the subject. A bare imperative whose summary merely
+# contains a colon (e.g. 'Revert "foo: bar"') has no such leading token.
+PREFIX_ATTEMPT_RE = re.compile(r"^[^\s:]+:")
+# The single canonical good shape: a lowercase component, colon, then a space.
+# A prefix attempt that does not match this (capitalised, missing space, stray
+# punctuation) is caught by one positive check instead of many blacklists.
+COMPONENT_CANONICAL_RE = re.compile(r"^[a-z0-9][\w.+/-]*: \S")
 
 # Leftover work-in-progress / fixup commits that must be squashed.
 FIXUP_RE = re.compile(r"^(fixup!|squash!|amend!)\s")
@@ -163,6 +169,20 @@ UPSTREAM_STATUS_RE = re.compile(
 IDENTITY_TRAILER_RE = re.compile(
     r"^([A-Za-z][A-Za-z-]*-by):\s*(.+?)\s+<([^<>\s]+@[^<>\s]+)>",
     re.IGNORECASE | re.MULTILINE)
+
+
+def normalize_subject(subject):
+    """Canonicalise a subject for prefix matching.
+
+    Collapses internal whitespace runs and removes whitespace before a colon,
+    so open-ended spacing variants ('UPSTREAM :', 'feat  (x) :') reduce to one
+    form the prefix rules can match. Case is handled by the rules themselves
+    (re.IGNORECASE / lowercased tokens). The original subject is kept for
+    display and the length check.
+    """
+    s = re.sub(r"\s+", " ", subject).strip()
+    s = re.sub(r"\s+:", ":", s)
+    return s
 
 
 def parse_signoffs(message):
@@ -236,35 +256,46 @@ def check_commit(commit, cfg=None, pr_author=None):
                            commit=commit.short_sha, subject=commit.subject))
 
     subject = commit.subject
+    norm = normalize_subject(subject)
 
     # --- subject structure -------------------------------------------------
     if not subject.strip():
         add("subject-empty", "error", "Commit has an empty subject line.")
     else:
-        cc_type = CC_TYPE_RE.match(subject)
-        cc_is_allowed = bool(cc_type) and (
-            cc_type.group(1).lower() in cfg.cc_allow_components)
-        if KERNEL_PREFIX_RE.match(subject):
-            prefix = re.split(r"\s*:", subject, 1)[0]
-            add("kernel-prefix", "error",
-                f"Drop the kernel-tree prefix '{prefix}:'; use a "
-                f"'component: summary' subject.")
-        elif CC_SCOPE_RE.match(subject) or (cc_type and not cc_is_allowed):
+        # Two small closed vocabularies (Conventional Commits types, kernel
+        # prefixes) are irreducible - they look like valid components but are
+        # not. Everything else is decided by one positive check: a subject
+        # that attempts a prefix must be the canonical lowercase-component
+        # shape; this subsumes a missing space after the colon and a
+        # capitalised or otherwise malformed prefix.
+        m_type = CC_TYPE_RE.match(norm)
+        is_cc = CC_SCOPE_RE.match(norm) or (
+            m_type and m_type.group(1).lower() not in cfg.cc_allow_components)
+        if is_cc:
             add("conventional-commit", "error",
                 "Drop the Conventional Commits prefix; use a "
                 "'component: imperative summary' subject.")
-        elif COLON_SPACE_RE.match(subject):
-            add("component-colon-space", "error",
-                "Add a space after the colon ('component: summary').")
+        elif KERNEL_PREFIX_RE.match(norm):
+            add("kernel-prefix", "error",
+                f"Drop the kernel-tree prefix '{norm.split(':', 1)[0]}:'; use "
+                f"a 'component: summary' subject.")
+        elif PREFIX_ATTEMPT_RE.match(norm) and not COMPONENT_CANONICAL_RE.match(norm):
+            add("invalid-component-prefix", "error",
+                "The text before the colon must be a lowercase component name "
+                "followed by a space (e.g. 'linux-qcom: ...').")
 
         if FIXUP_RE.match(subject) or WIP_RE.match(subject):
             add("fixup-commit", "error",
                 "Work-in-progress/fixup commit; squash it into the commit "
                 "it belongs to.")
-        elif is_webedit_subject(subject):
-            add("webedit-subject", "error",
-                "GitHub web-editor subject; write a 'component: summary' "
-                "line and squash the series.")
+
+        # Auto-generated web-editor subjects are advisory: a bare imperative
+        # is a valid subject, so "is this really a web edit" is a judgement
+        # call. Web commits that matter are gated by identity-webclient.
+        if is_webedit_subject(subject):
+            add("webedit-subject", "warning",
+                "Subject looks auto-generated by the GitHub web editor; write "
+                "a descriptive 'component: summary' line.")
 
         if len(subject) > cfg.subject_max_length:
             add("subject-too-long", "warning",

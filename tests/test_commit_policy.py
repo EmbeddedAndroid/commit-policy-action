@@ -75,7 +75,7 @@ def test_pr1937_kernel_prefix():
 def test_pr1951_colon_space():
     msg = ("qwes:Migrate SRC_URI for prebuilts to QArtifactory\n\nb\n\n"
            "Signed-off-by: Mani Sankar Javvaji <mjavvaji@qti.qualcomm.com>")
-    assert "component-colon-space" in errors(cp.check_commit(commit(msg)))
+    assert "invalid-component-prefix" in errors(cp.check_commit(commit(msg)))
 
 
 def test_pr1889_missing_signoff():
@@ -90,7 +90,8 @@ def test_pr1612_webedit_and_identity():
            "Signed-off-by: steve345 <7432003+steve345@users.noreply.github.com>")
     f = cp.check_commit(commit(msg, author=(
         "steve345", "7432003+steve345@users.noreply.github.com")))
-    assert "webedit-subject" in errors(f)
+    # web-edit subject is advisory now; the noreply identity is what gates.
+    assert "webedit-subject" in rules(f)
     assert "identity-webclient" in errors(f)
 
 
@@ -226,7 +227,8 @@ def test_webedit_extensionless(subj):
     f = cp.check_commit(commit(
         subj + "\n\nb\n\nSigned-off-by: Dev <dev@oss.qualcomm.com>",
         author=("Dev", "dev@oss.qualcomm.com")))
-    assert "webedit-subject" in errors(f)
+    assert "webedit-subject" in rules(f)      # advisory warning
+    assert "webedit-subject" not in errors(f)  # not a gate
 
 
 @pytest.mark.parametrize("subj", [
@@ -237,7 +239,7 @@ def test_webedit_no_false_positive(subj):
     f = cp.check_commit(commit(
         subj + "\n\nb\n\nSigned-off-by: Dev <dev@oss.qualcomm.com>",
         author=("Dev", "dev@oss.qualcomm.com")))
-    assert "webedit-subject" not in errors(f)
+    assert "webedit-subject" not in rules(f)
 
 
 # #11: Conventional Commits scope with a space before the parenthesis.
@@ -322,7 +324,8 @@ def test_webedit_known_files_outside_set(subj):
     f = cp.check_commit(commit(
         subj + "\n\nb\n\nSigned-off-by: Dev <dev@oss.qualcomm.com>",
         author=("Dev", "dev@oss.qualcomm.com")))
-    assert "webedit-subject" in errors(f)
+    assert "webedit-subject" in rules(f)       # advisory warning
+    assert "webedit-subject" not in errors(f)
 
 
 @pytest.mark.parametrize("subj", [
@@ -332,7 +335,40 @@ def test_webedit_lowercase_words_not_flagged(subj):
     f = cp.check_commit(commit(
         subj + "\n\nb\n\nSigned-off-by: Dev <dev@oss.qualcomm.com>",
         author=("Dev", "dev@oss.qualcomm.com")))
-    assert "webedit-subject" not in errors(f)
+    assert "webedit-subject" not in rules(f)
+
+
+# --------------------------------------------------------------------------
+# Positive subject grammar (one check subsumes colon-space + capitalisation).
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("subj", [
+    "Weston: enable RDP",        # capitalised component
+    "qwes:Migrate prebuilts",    # missing space after colon
+    "Note: temporary hack",      # capitalised label
+    "FOO.BAR: do a thing",       # upper-case component
+], ids=["capitalised", "no-space", "label", "upper"])
+def test_invalid_component_prefix(subj):
+    f = cp.check_commit(commit(
+        subj + "\n\nb\n\nSigned-off-by: Dev <dev@oss.qualcomm.com>",
+        author=("Dev", "dev@oss.qualcomm.com")))
+    assert "invalid-component-prefix" in errors(f)
+
+
+@pytest.mark.parametrize("subj", [
+    "linux-qcom: enable thing",          # canonical component
+    "ci/qcom-distro: fix the build",     # component with a slash
+    "debug.yml: enable ftrace",          # component with a dot
+    "Drop SoC version suffixes (#2159)",  # bare imperative, no prefix
+    'Revert "weston: enable RDP"',        # bare imperative whose summary has a colon
+    "x86: enable the thing",             # short lowercase component
+], ids=["canonical", "slash", "dot", "bare", "revert", "short"])
+def test_valid_subjects_not_flagged(subj):
+    f = cp.check_commit(commit(
+        subj + "\n\nbody\n\nSigned-off-by: Dev <dev@oss.qualcomm.com>",
+        author=("Dev", "dev@oss.qualcomm.com")))
+    bad = {"conventional-commit", "kernel-prefix", "invalid-component-prefix"}
+    assert bad.isdisjoint(errors(f)), errors(f)
 
 
 # Structural: a failed patch-content fetch is surfaced, not silently skipped.
