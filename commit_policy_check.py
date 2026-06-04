@@ -74,6 +74,10 @@ class Commit:
     committer_email: str = ""
     message: str = ""
     parents: list = field(default_factory=list)
+    # GitHub-verified accounts the author/committer emails map to. Populated
+    # in API mode (empty in git mode); "" means "no account / unknown".
+    author_login: str = ""
+    committer_login: str = ""
 
     @property
     def short_sha(self):
@@ -151,14 +155,13 @@ WEBEDIT_KNOWN_FILES = frozenset({
 UPSTREAM_STATUS_RE = re.compile(
     r"^Upstream-Status:[ \t]*([A-Za-z-]+)", re.IGNORECASE | re.MULTILINE)
 
-# Trailers asserting a person's involvement. Any such trailer for an identity
-# other than the author or committer cannot be verified deterministically and
-# is surfaced for a human. No end-of-line anchor, so a trailing comment after
-# the address (e.g. "Acked-by: X <e> # note") cannot hide the trailer.
+# Trailers asserting a person's involvement. Matched by shape - any
+# "Word-by:" trailer (Signed-off-by, Acked-by, Reviewed-by, Approved-by,
+# Endorsed-by, Co-authored-by, ...) - rather than a closed list, so a forged
+# endorsement under a novel trailer name cannot slip through. No end-of-line
+# anchor, so a trailing comment after the address cannot hide the trailer.
 IDENTITY_TRAILER_RE = re.compile(
-    r"^(Signed-off-by|Co-developed-by|Co-authored-by|Reviewed-by|Acked-by"
-    r"|Tested-by|Reported-by|Suggested-by):"
-    r"\s*(.+?)\s+<([^<>\s]+@[^<>\s]+)>",
+    r"^([A-Za-z][A-Za-z-]*-by):\s*(.+?)\s+<([^<>\s]+@[^<>\s]+)>",
     re.IGNORECASE | re.MULTILINE)
 
 
@@ -177,16 +180,30 @@ def parse_signoffs(message):
 
 
 def is_webedit_subject(subject):
-    """True for an auto-generated GitHub web-editor commit subject."""
+    """True for an auto-generated GitHub web-editor commit subject.
+
+    A verb plus a single filename-like token (and nothing else) is the
+    web-editor shape. "Filename-like" is judged by shape - a path, an
+    extension, a "*file" name, an ALL-CAPS build file, or a known dotfile -
+    rather than a closed allow-list, so files outside the set (Jenkinsfile,
+    Doxyfile, BUILD, WORKSPACE, ...) are still caught while ordinary words
+    (Update toolchain) are not.
+    """
     if UPLOAD_RE.match(subject):
         return True
     m = WEBEDIT_VERB_RE.match(subject)
     if not m:
         return False
     token = m.group(2)
-    if "." in token or "/" in token:
+    if "." in token or "/" in token:                  # path or has an extension
         return True
-    return token.lower() in WEBEDIT_KNOWN_FILES
+    if token.lower() in WEBEDIT_KNOWN_FILES:          # Kconfig, Kbuild, ...
+        return True
+    if re.search(r"file$", token, re.IGNORECASE):     # Jenkinsfile, Doxyfile, ...
+        return True
+    if token.isupper() and len(token) >= 3:           # BUILD, WORKSPACE, COPYING
+        return True
+    return False
 
 
 def body_is_empty(commit):
@@ -204,8 +221,13 @@ def body_is_empty(commit):
 # Rule engine
 # --------------------------------------------------------------------------
 
-def check_commit(commit, cfg=None):
-    """Return the list of Findings for a single commit."""
+def check_commit(commit, cfg=None, pr_author=None):
+    """Return the list of Findings for a single commit.
+
+    pr_author is the GitHub login of the pull request submitter (API mode);
+    when set, the GitHub-verified author/committer accounts are cross-checked
+    against it. None disables those checks (git mode has no login data).
+    """
     cfg = cfg or Config()
     out = []
 
@@ -297,8 +319,26 @@ def check_commit(commit, cfg=None):
                 f"{kind} '{email}' is a GitHub noreply address; prefer a "
                 f"routable email.")
 
+    # --- GitHub-verified author identity (API mode) -----------------------
+    # GitHub maps each commit's author email to an account. If a commit is
+    # authored by a real account other than the PR submitter, surface it:
+    # outright authorship spoofing (e.g. committing as a maintainer) shows up
+    # here. Unlinked emails resolve to no account ("") and are not flagged, to
+    # avoid noise on the common case of committing with an off-GitHub email.
+    if pr_author and commit.author_login and \
+            commit.author_login.lower() != pr_author.lower():
+        add("author-not-submitter", "warning",
+            f"Commit authored by GitHub user '{commit.author_login}', not the "
+            f"pull request submitter '{pr_author}'; confirm the identity.")
+
     # --- unverifiable co-trailers -----------------------------------------
-    own = {e.lower() for e in (commit.author_email, commit.committer_email) if e}
+    # Trust the author's address. Trust the committer's only when GitHub
+    # confirms the committer is the PR submitter - the committer field is
+    # otherwise attacker-controlled and can launder a forged trailer.
+    own = {commit.author_email.lower()} if commit.author_email else set()
+    if (commit.committer_email and pr_author and commit.committer_login
+            and commit.committer_login.lower() == pr_author.lower()):
+        own.add(commit.committer_email.lower())
     others = [f"{tt} {nm} <{em}>"
               for tt, nm, em in IDENTITY_TRAILER_RE.findall(commit.message)
               if em.lower() not in own]
@@ -322,6 +362,14 @@ def check_patch_files(patch_files, cfg=None):
     for pf in patch_files:
         if pf.status == "D":
             continue
+        if pf.content is None:
+            # The content fetch failed; do not silently skip the gate.
+            out.append(Finding(
+                rule="patch-unfetched", severity="warning",
+                message=("Could not fetch this patch file to verify its "
+                         "Upstream-Status header; check it manually."),
+                path=pf.path, line=1))
+            continue
         m = UPSTREAM_STATUS_RE.search(pf.content)
         if not m:
             out.append(Finding(
@@ -338,12 +386,12 @@ def check_patch_files(patch_files, cfg=None):
     return out
 
 
-def check_all(commits, patch_files=None, cfg=None):
+def check_all(commits, patch_files=None, cfg=None, pr_author=None):
     """Run every enabled rule and return the full list of Findings."""
     cfg = cfg or Config()
     findings = []
     for c in commits:
-        findings.extend(check_commit(c, cfg))
+        findings.extend(check_commit(c, cfg, pr_author))
     if patch_files and cfg.patch_check:
         findings.extend(check_patch_files(patch_files, cfg))
     if cfg.disable_rules:
@@ -526,16 +574,28 @@ def _get_all(url, token):
     return items
 
 
+def get_pr_author(repo, pr, token):
+    """Return the GitHub login of the pull request submitter."""
+    _, data, _ = _api("GET", f"{_API}/repos/{repo}/pulls/{pr}", token)
+    return ((data or {}).get("user") or {}).get("login") or ""
+
+
 def load_commits_api(repo, pr, token):
     data = _get_all(f"{_API}/repos/{repo}/pulls/{pr}/commits?per_page=100", token)
     commits = []
     for c in data:
         ca = c["commit"].get("author") or {}
         cc = c["commit"].get("committer") or {}
+        # Top-level author/committer are the GitHub accounts the emails map
+        # to (or null); the verified provenance the raw git metadata lacks.
+        gh_a = c.get("author") or {}
+        gh_c = c.get("committer") or {}
         commits.append(Commit(
             sha=c["sha"], parents=[p["sha"] for p in c.get("parents", [])],
             author_name=ca.get("name", ""), author_email=ca.get("email", ""),
             committer_name=cc.get("name", ""), committer_email=cc.get("email", ""),
+            author_login=gh_a.get("login") or "",
+            committer_login=gh_c.get("login") or "",
             message=c["commit"]["message"]))
     return commits
 
@@ -553,7 +613,9 @@ def load_patch_files_api(repo, pr, head_sha, token):
             _, content, _ = _api("GET", url, token,
                                  accept="application/vnd.github.raw")
         except urllib.error.HTTPError:
-            continue
+            # Surface the failure (content=None) instead of silently skipping,
+            # so a fetch failure cannot bypass the Upstream-Status gate.
+            content = None
         out.append(PatchFile(path=path, content=content,
                              status=f["status"][0].upper()))
     return out
@@ -646,6 +708,7 @@ def main(argv=None):
 
     cfg = _config_from_args(args)
 
+    pr_author = None
     if args.api:
         if not (args.repo and args.pr):
             p.error("--api needs --repo and --pr")
@@ -653,6 +716,7 @@ def main(argv=None):
         if not token:
             p.error("--api needs $GITHUB_TOKEN")
         commits = load_commits_api(args.repo, args.pr, token)
+        pr_author = get_pr_author(args.repo, args.pr, token)
         head_sha = args.head_sha or (commits[-1].sha if commits else "")
         patch_files = (load_patch_files_api(args.repo, args.pr, head_sha, token)
                        if cfg.patch_check else [])
@@ -664,7 +728,12 @@ def main(argv=None):
                        if cfg.patch_check else [])
         head_sha = args.head_sha or (commits[-1].sha if commits else "")
 
-    findings = check_all(commits, patch_files, cfg)
+    findings = check_all(commits, patch_files, cfg, pr_author)
+    if args.api and len(commits) >= 250:
+        findings.append(Finding(
+            rule="pr-too-large", severity="warning",
+            message=("This pull request has 250 or more commits; only the "
+                     "first 250 were retrieved and checked.")))
 
     if args.format == "json":
         print(json.dumps([f.__dict__ for f in findings], indent=2))

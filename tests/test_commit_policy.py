@@ -16,15 +16,18 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import commit_policy_check as cp  # noqa: E402
 
 
-def commit(message, author=None, parents=None):
+def commit(message, author=None, parents=None, committer=None,
+           author_login="", committer_login=""):
     if author is None:
         sobs, _ = cp.parse_signoffs(message)
         name, email = sobs[-1] if sobs else ("Nobody", "nobody@example.com")
     else:
         name, email = author
+    cname, cemail = committer if committer else (name, email)
     return cp.Commit(sha="0" * 40, message=message, parents=parents or ["p1"],
                      author_name=name, author_email=email,
-                     committer_name=name, committer_email=email)
+                     committer_name=cname, committer_email=cemail,
+                     author_login=author_login, committer_login=committer_login)
 
 
 def rules(findings):
@@ -248,6 +251,95 @@ def test_cc_spacing_variants(subj):
         subj + "\n\nb\n\nSigned-off-by: Dev <dev@oss.qualcomm.com>",
         author=("Dev", "dev@oss.qualcomm.com")))
     assert "conventional-commit" in errors(f)
+
+
+# --------------------------------------------------------------------------
+# Evasion round 3.
+# --------------------------------------------------------------------------
+
+# #12a: authoring as someone other than the PR submitter (verified login).
+def test_identity_spoof_author_not_submitter():
+    msg = ("qcom-distro: enable a feature\n\nwhy\n\n"
+           "Signed-off-by: Bjorn Andersson <andersson@kernel.org>")
+    c = commit(msg, author=("Bjorn Andersson", "andersson@kernel.org"),
+               author_login="andersson")
+    f = cp.check_commit(c, pr_author="EmbeddedAndroid")
+    assert "author-not-submitter" in rules(f)
+    assert "author-not-submitter" not in errors(f)  # warning, not a gate
+
+
+def test_identity_self_authored_not_flagged():
+    msg = ("qcom-distro: enable a feature\n\nwhy\n\n"
+           "Signed-off-by: Dev <dev@oss.qualcomm.com>")
+    c = commit(msg, author=("Dev", "dev@oss.qualcomm.com"),
+               author_login="EmbeddedAndroid")
+    f = cp.check_commit(c, pr_author="EmbeddedAndroid")
+    assert "author-not-submitter" not in rules(f)
+
+
+def test_unlinked_email_does_not_warn():
+    # An email mapping to no GitHub account (login "") must not be flagged,
+    # to avoid noise on the common off-GitHub commit email case.
+    msg = ("qcom-distro: enable a feature\n\nwhy\n\n"
+           "Signed-off-by: Dev <dev@oss.qualcomm.com>")
+    c = commit(msg, author=("Dev", "dev@oss.qualcomm.com"), author_login="")
+    assert "author-not-submitter" not in rules(
+        cp.check_commit(c, pr_author="EmbeddedAndroid"))
+
+
+# #12b: a forged sign-off laundered through the committer field. The committer
+# is only trusted when GitHub confirms it is the PR submitter.
+def test_committer_launder_still_flagged():
+    msg = ("linux-qcom: do a thing\n\nwhy\n\n"
+           "Signed-off-by: Tyler Baker <tyler.baker@oss.qualcomm.com>\n"
+           "Signed-off-by: Greg Kroah-Hartman <gregkh@kernel.org>")
+    c = commit(msg, author=("Tyler Baker", "tyler.baker@oss.qualcomm.com"),
+               committer=("Greg Kroah-Hartman", "gregkh@kernel.org"),
+               author_login="tylerbaker", committer_login="")
+    f = cp.check_commit(c, pr_author="tylerbaker")
+    assert "unverified-cotrailer" in rules(f)
+    note = [x for x in f if x.rule == "unverified-cotrailer"][0].message
+    assert "gregkh@kernel.org" in note
+
+
+# #13: forged endorsement under a non-standard "*-by" trailer.
+@pytest.mark.parametrize("trailer", [
+    "Approved-by: Bjorn Andersson <andersson@kernel.org>",
+    "Endorsed-by: Greg Kroah-Hartman <gregkh@kernel.org>",
+], ids=["approved-by", "endorsed-by"])
+def test_nonstandard_trailer(trailer):
+    msg = ("linux-qcom: do a thing\n\nwhy\n\n"
+           "Signed-off-by: Dev <dev@oss.qualcomm.com>\n" + trailer)
+    f = cp.check_commit(commit(msg, author=("Dev", "dev@oss.qualcomm.com")))
+    assert "unverified-cotrailer" in rules(f)
+
+
+# #14: web-editor subject on an extensionless file outside the known set.
+@pytest.mark.parametrize("subj", [
+    "Create Jenkinsfile", "Update Doxyfile", "Update BUILD", "Update WORKSPACE",
+], ids=["jenkinsfile", "doxyfile", "build", "workspace"])
+def test_webedit_known_files_outside_set(subj):
+    f = cp.check_commit(commit(
+        subj + "\n\nb\n\nSigned-off-by: Dev <dev@oss.qualcomm.com>",
+        author=("Dev", "dev@oss.qualcomm.com")))
+    assert "webedit-subject" in errors(f)
+
+
+@pytest.mark.parametrize("subj", [
+    "Update toolchain", "Create sysroot", "Update copyright",
+], ids=["toolchain", "sysroot", "copyright"])
+def test_webedit_lowercase_words_not_flagged(subj):
+    f = cp.check_commit(commit(
+        subj + "\n\nb\n\nSigned-off-by: Dev <dev@oss.qualcomm.com>",
+        author=("Dev", "dev@oss.qualcomm.com")))
+    assert "webedit-subject" not in errors(f)
+
+
+# Structural: a failed patch-content fetch is surfaced, not silently skipped.
+def test_patch_unfetched_is_warned():
+    f = cp.check_patch_files([cp.PatchFile("a/x.patch", None)])
+    assert rules(f) == {"patch-unfetched"}
+    assert f[0].severity == "warning" and f[0].path == "a/x.patch"
 
 
 # --------------------------------------------------------------------------
