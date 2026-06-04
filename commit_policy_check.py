@@ -24,6 +24,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -573,22 +574,56 @@ def load_patch_files_git(base, head, cwd="."):
 # --------------------------------------------------------------------------
 
 _API = "https://api.github.com"
+API_TIMEOUT = 12   # per-request socket timeout; a stalled connection fails
+API_RETRIES = 4    # transient (timeout / 5xx / secondary-limit) retries, GET only
+
+
+def _retry_after(err):
+    try:
+        return int(err.headers.get("Retry-After", ""))
+    except (TypeError, ValueError, AttributeError):
+        return None
 
 
 def _api(method, url, token, data=None, accept="application/vnd.github+json"):
+    """A GitHub API call with a socket timeout and retries.
+
+    urllib has no default timeout, so without this a single stalled
+    connection (intermittent on some networks) hangs the whole tool. Only
+    idempotent GETs are retried; a POST is never retried, to avoid posting a
+    review twice.
+    """
     body = json.dumps(data).encode() if data is not None else None
-    req = urllib.request.Request(url, data=body, method=method)
-    if token:  # optional: public reads work unauthenticated (rate-limited)
-        req.add_header("Authorization", f"Bearer {token}")
-    req.add_header("Accept", accept)
-    req.add_header("X-GitHub-Api-Version", "2022-11-28")
-    if body is not None:
-        req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req) as resp:
-        payload = resp.read()
-        if accept.endswith("raw"):
-            return resp.status, payload.decode("utf-8", "replace"), resp.headers
-        return resp.status, json.loads(payload or b"null"), resp.headers
+    raw = accept.endswith("raw")
+    attempts = API_RETRIES if method == "GET" else 1
+    last = None
+    for i in range(attempts):
+        req = urllib.request.Request(url, data=body, method=method)
+        if token:  # optional: public reads work unauthenticated (rate-limited)
+            req.add_header("Authorization", f"Bearer {token}")
+        req.add_header("Accept", accept)
+        req.add_header("X-GitHub-Api-Version", "2022-11-28")
+        if body is not None:
+            req.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(req, timeout=API_TIMEOUT) as resp:
+                payload = resp.read()
+                if raw:
+                    return resp.status, payload.decode("utf-8", "replace"), resp.headers
+                return resp.status, json.loads(payload or b"null"), resp.headers
+        except urllib.error.HTTPError as e:
+            if e.code in (403, 429, 500, 502, 503, 504) and i < attempts - 1:
+                time.sleep(min(_retry_after(e) or 2 ** i, 20))
+                last = e
+                continue
+            raise
+        except (urllib.error.URLError, OSError) as e:  # timeout / DNS / reset
+            if i < attempts - 1:
+                time.sleep(0.5 * (2 ** i))
+                last = e
+                continue
+            raise
+    raise last  # pragma: no cover
 
 
 def _next_link(link_header):
@@ -709,8 +744,13 @@ def parse_pr_url(url):
     return m.group(1), m.group(2), (int(m.group(3)) if m.group(3) else None)
 
 
+def _drop_drafts(items):
+    """Drop draft pull requests; they are work-in-progress, not ready to review."""
+    return [it for it in items if not it.get("draft")]
+
+
 def list_open_prs(owner, repo, token, limit=10, page=1, sort="updated"):
-    """One page of open PRs, most-recently-active first by default.
+    """One page of open, non-draft PRs, most-recently-active first by default.
 
     The list response already carries head.sha and user.login, so a per-PR
     metadata fetch is not needed to review them.
@@ -718,7 +758,7 @@ def list_open_prs(owner, repo, token, limit=10, page=1, sort="updated"):
     url = (f"{_API}/repos/{owner}/{repo}/pulls?state=open&sort={sort}"
            f"&direction=desc&per_page={limit}&page={page}")
     _, data, _ = _api("GET", url, token)
-    return data
+    return _drop_drafts(data)
 
 
 def check_pr_item(slug, item, token, cfg):
@@ -737,7 +777,7 @@ def check_pr_item(slug, item, token, cfg):
     return findings
 
 
-def check_pr_items(slug, items, token, cfg, workers=10):
+def check_pr_items(slug, items, token, cfg, workers=6):
     """Check a page of PRs concurrently; returns {number: (status, value)}."""
     out = {}
     if not items:
@@ -1052,7 +1092,13 @@ def main(argv=None):
     cfg = _config_from_args(args)
 
     if args.url:  # interactive read-only review of a PR URL
-        return interactive_review(args.url, cfg)
+        code = interactive_review(args.url, cfg) or 0
+        # Hard-exit so an in-flight background prefetch cannot keep the process
+        # alive: concurrent.futures joins its (non-daemon) workers at exit, and
+        # on a flaky network those can stall for a long time.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(code)
 
     pr_author = None
     if args.api:

@@ -186,3 +186,13 @@ def test_parse_pr_url(url, expected):
 def test_parse_pr_url_rejects_non_github():
     with pytest.raises(ValueError):
         cp.parse_pr_url("https://example.com/foo/bar")
+
+
+def test_drop_drafts():
+    items = [
+        {"number": 1, "draft": False},
+        {"number": 2, "draft": True},
+        {"number": 3},                 # absent flag = not a draft
+        {"number": 4, "draft": True},
+    ]
+    assert [it["number"] for it in cp._drop_drafts(items)] == [1, 3]
