@@ -18,6 +18,7 @@
 # deliberately left to human review; this tool never claims to replace it.
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -576,7 +577,8 @@ _API = "https://api.github.com"
 def _api(method, url, token, data=None, accept="application/vnd.github+json"):
     body = json.dumps(data).encode() if data is not None else None
     req = urllib.request.Request(url, data=body, method=method)
-    req.add_header("Authorization", f"Bearer {token}")
+    if token:  # optional: public reads work unauthenticated (rate-limited)
+        req.add_header("Authorization", f"Bearer {token}")
     req.add_header("Accept", accept)
     req.add_header("X-GitHub-Api-Version", "2022-11-28")
     if body is not None:
@@ -677,6 +679,162 @@ def post_review(repo, pr, head_sha, payload, token):
 
 
 # --------------------------------------------------------------------------
+# Interactive review (read-only maintainer evaluation tool)
+# --------------------------------------------------------------------------
+#
+# Point the script at a repository or pull request URL to browse recent pull
+# requests, run the checker against one through the API WITHOUT posting
+# anything, and print the review the action would post plus a clickable link
+# per finding so a maintainer can act on it by hand. Lets a project try the
+# rules before wiring the action into CI.
+
+def _token():
+    t = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if t:
+        return t
+    try:
+        return subprocess.run(["gh", "auth", "token"], capture_output=True,
+                              text=True, check=True).stdout.strip()
+    except Exception:
+        return ""  # public repos are readable unauthenticated (rate-limited)
+
+
+def parse_pr_url(url):
+    """Return (owner, repo, pr_number_or_None) from a github.com URL."""
+    m = re.match(r"https?://github\.com/([^/]+)/([^/?#]+)(?:/(?:pull|pulls)/?"
+                 r"(\d+)?)?", url.strip().rstrip("/"))
+    if not m:
+        raise ValueError(f"not a recognised GitHub URL: {url}")
+    return m.group(1), m.group(2), (int(m.group(3)) if m.group(3) else None)
+
+
+def list_open_prs(owner, repo, token, limit=10):
+    url = (f"{_API}/repos/{owner}/{repo}/pulls?state=open&sort=created"
+           f"&direction=desc&per_page={limit}")
+    _, data, _ = _api("GET", url, token)
+    return data
+
+
+def review_pr_readonly(owner, repo, pr, token, cfg):
+    slug = f"{owner}/{repo}"
+    _, meta, _ = _api("GET", f"{_API}/repos/{slug}/pulls/{pr}", token)
+    head_sha = (meta.get("head") or {}).get("sha", "")
+    commits = load_commits_api(slug, pr, token)
+    pr_author = ((meta.get("user") or {}).get("login")) or ""
+    patch_files = (load_patch_files_api(slug, pr, head_sha, token)
+                   if cfg.patch_check else [])
+    findings = check_all(commits, patch_files, cfg, pr_author)
+    if len(commits) >= 250:
+        findings.append(Finding(
+            rule="pr-too-large", severity="warning",
+            message="250+ commits; only the first 250 were checked."))
+    return meta, findings
+
+
+def comment_url(owner, repo, pr, finding):
+    """A URL where a maintainer can leave the comment for this finding."""
+    if finding.path and finding.line:
+        h = hashlib.sha256(finding.path.encode()).hexdigest()
+        return (f"https://github.com/{owner}/{repo}/pull/{pr}/files"
+                f"#diff-{h}R{finding.line}")
+    if finding.commit and finding.commit != "(working)":
+        return (f"https://github.com/{owner}/{repo}/pull/{pr}/commits/"
+                f"{finding.commit}")
+    return f"https://github.com/{owner}/{repo}/pull/{pr}"
+
+
+def _style(text, code):
+    if sys.stdout.isatty():
+        return f"\033[{code}m{text}\033[0m"
+    return text
+
+
+def render_cli_review(owner, repo, pr, meta, findings):
+    title = meta.get("title", "")
+    author = (meta.get("user") or {}).get("login", "?")
+    errs = sum(1 for f in findings if f.severity == "error")
+    verdict = "REQUEST CHANGES" if errs else ("COMMENT" if findings else "APPROVE / no issues")
+    print()
+    print(_style(f"PR #{pr}: {title}", "1"))
+    print(_style(f"by {author}  |  https://github.com/{owner}/{repo}/pull/{pr}", "2"))
+    print(_style(f"Verdict the action would post: {verdict}", "1"))
+    print()
+    print(_style("Review body (what the bot would post):", "1"))
+    print("-" * 70)
+    print(render_review_body(findings))
+    print("-" * 70)
+    if not findings:
+        return
+    print()
+    print(_style("Suggested comments (paste the text at each link):", "1"))
+    for f in findings:
+        sev = _style("ERROR", "31") if f.severity == "error" else _style("warn", "33")
+        where = f"{f.path}:{f.line}" if f.path else (f.commit or "PR")
+        print(f"\n  [{sev}] {f.rule}  ({where})")
+        print(f"      open:  {_style(comment_url(owner, repo, pr, f), '36')}")
+        print(f"      paste: {f.message}")
+
+
+def interactive_review(url, cfg):
+    token = _token()
+    try:
+        owner, repo, pr = parse_pr_url(url)
+    except ValueError as e:
+        sys.stderr.write(f"{e}\n")
+        return 2
+    if not token:
+        sys.stderr.write("Note: no GITHUB_TOKEN / gh login found; using "
+                         "unauthenticated API (low rate limit).\n")
+
+    print(_style(f"commit-policy review (read-only) — {owner}/{repo}", "1"))
+    while True:
+        if pr is None:
+            try:
+                prs = list_open_prs(owner, repo, token, 10)
+            except urllib.error.HTTPError as e:
+                sys.stderr.write(f"API error: {e.code} {e.reason}\n")
+                return 1
+            if not prs:
+                print("No open pull requests.")
+                return 0
+            print(_style("\nMost recent open pull requests:", "1"))
+            for i, p in enumerate(prs, 1):
+                created = (p.get("created_at") or "")[:10]
+                who = (p.get("user") or {}).get("login", "?")
+                print(f"  {i:2}. #{p['number']:<5} {p['title'][:60]}")
+                print(_style(f"        by {who} on {created}", "2"))
+            try:
+                choice = input("\nSelect 1-10, a PR number (#NNN), or q to quit: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return 0
+            if choice.lower() in ("q", "quit", ""):
+                return 0
+            choice = choice.lstrip("#")
+            if not choice.isdigit():
+                print("Please enter a list index, a PR number, or q.")
+                continue
+            num = int(choice)
+            pr = prs[num - 1]["number"] if 1 <= num <= len(prs) else num
+
+        try:
+            meta, findings = review_pr_readonly(owner, repo, pr, token, cfg)
+        except urllib.error.HTTPError as e:
+            sys.stderr.write(f"Could not load PR #{pr}: {e.code} {e.reason}\n")
+            pr = None
+            continue
+        render_cli_review(owner, repo, pr, meta, findings)
+        pr = None
+        try:
+            again = input("\nEnter to browse the list again, or q to quit: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if again.lower() in ("q", "quit"):
+            return 0
+
+
+# --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
 
@@ -705,6 +863,9 @@ def _config_from_args(args):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("url", nargs="?",
+                   help="GitHub repo or pull request URL: launches an "
+                        "interactive, read-only review (nothing is posted)")
     src = p.add_argument_group("source (choose git range or --api)")
     src.add_argument("--base", help="base ref/sha (excluded) for git mode")
     src.add_argument("--head", help="head ref/sha for git mode")
@@ -738,6 +899,9 @@ def main(argv=None):
     args = p.parse_args(argv)
 
     cfg = _config_from_args(args)
+
+    if args.url:  # interactive read-only review of a PR URL
+        return interactive_review(args.url, cfg)
 
     pr_author = None
     if args.api:

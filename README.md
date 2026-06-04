@@ -89,6 +89,23 @@ the reused workflow inherits it.
 | `approve-on-pass` | `false` | Submit an APPROVE review when clean. |
 | `fail-on-error` | `true` | Fail the job on a blocking issue. |
 
+## Try it before deploying (interactive review)
+
+Point the script at a repository or pull-request URL to evaluate the rules
+against real pull requests without posting anything - a way to see what the
+action would do before wiring it into CI:
+
+```sh
+python3 commit_policy_check.py https://github.com/qualcomm-linux/meta-qcom/pulls
+```
+
+It lists the ten most recent open pull requests; pick one (by list number or
+`#NNN`) and it prints the review the action would post, plus a link and the
+ready-to-paste text for each finding so a maintainer can leave the comments by
+hand. Pass a specific pull-request URL (`.../pull/123`) to review it directly.
+A `GITHUB_TOKEN` or `gh` login is used when present (recommended, to avoid API
+rate limits); public repositories also work unauthenticated.
+
 ## Running locally
 
 The checker is a single self-contained script. Against a local branch:
