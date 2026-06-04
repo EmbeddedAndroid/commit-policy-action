@@ -794,14 +794,30 @@ def _style(text, code):
     return text
 
 
+def _link(url, label=None):
+    """Wrap text in an OSC 8 terminal hyperlink when stdout is a TTY.
+
+    Terminals that support OSC 8 (iTerm2, kitty, WezTerm, VTE/GNOME Terminal,
+    Windows Terminal, ...) render the label as a clickable link to url; the
+    rest ignore the escape and just show the label. The label defaults to the
+    URL so even an unsupported terminal shows a (usually click-through) URL.
+    Set NO_HYPERLINKS=1 to disable.
+    """
+    label = url if label is None else label
+    if sys.stdout.isatty() and not os.environ.get("NO_HYPERLINKS"):
+        return f"\033]8;;{url}\033\\{label}\033]8;;\033\\"
+    return label
+
+
 def render_cli_review(owner, repo, pr, meta, findings):
     title = meta.get("title", "")
     author = (meta.get("user") or {}).get("login", "?")
     errs = sum(1 for f in findings if f.severity == "error")
     verdict = "REQUEST CHANGES" if errs else ("COMMENT" if findings else "APPROVE / no issues")
+    pr_url = f"https://github.com/{owner}/{repo}/pull/{pr}"
     print()
-    print(_style(f"PR #{pr}: {title}", "1"))
-    print(_style(f"by {author}  |  https://github.com/{owner}/{repo}/pull/{pr}", "2"))
+    print(_link(pr_url, _style(f"PR #{pr}: {title}", "1")))
+    print(_style(f"by {author}  |  ", "2") + _link(pr_url, _style(pr_url, "2")))
     print(_style(f"Verdict the action would post: {verdict}", "1"))
     print()
     print(_style("Review body (what the bot would post):", "1"))
@@ -815,8 +831,9 @@ def render_cli_review(owner, repo, pr, meta, findings):
     for f in findings:
         sev = _style("ERROR", "31") if f.severity == "error" else _style("warn", "33")
         where = f"{f.path}:{f.line}" if f.path else (f.commit or "PR")
+        url = comment_url(owner, repo, pr, f)
         print(f"\n  [{sev}] {f.rule}  ({where})")
-        print(f"      open:  {_style(comment_url(owner, repo, pr, f), '36')}")
+        print(f"      open:  {_link(url, _style(url, '36'))}")
         print(f"      paste: {f.message}")
 
 
@@ -833,6 +850,7 @@ def interactive_review(url, cfg):
                          "unauthenticated API (low rate limit).\n")
 
     cache = {}  # number -> (item, status, findings) so re-opening is instant
+    order = []  # PR numbers in display order, so a bare N selects by position
     bg = ThreadPoolExecutor(max_workers=1)  # prefetch the next page
 
     def load_page(page):
@@ -845,10 +863,12 @@ def interactive_review(url, cfg):
             status, val = results.get(n, ("err", None))
             findings = val if status == "ok" else []
             cache[n] = (it, status, findings)
+            order.append(n)
             who = (it.get("user") or {}).get("login", "?")
             when = (it.get("updated_at") or "")[:10]
-            print(f"{_pr_tag(status, findings)} {_style(f'{i:>3}.', '2')} "
-                  f"{_style(f'#{n}', '1')}  {it['title'][:56]}")
+            head = _link(f"https://github.com/{slug}/pull/{n}",
+                         _style(f"#{n}", "1") + f"  {it['title'][:56]}")
+            print(f"{_pr_tag(status, findings)} {_style(f'{i:>3}.', '2')} {head}")
             print(_style(f"{'':>15}by {who} · updated {when}", "2"))
         return base + len(items)
 
@@ -885,7 +905,7 @@ def interactive_review(url, cfg):
         while True:
             try:
                 choice = input(_style(
-                    "\n[Enter] more · #NNN review · r refresh · q quit: ",
+                    "\n[Enter] more · N or #NNN review · r refresh · q quit: ",
                     "1")).strip()
             except (EOFError, KeyboardInterrupt):
                 print()
@@ -897,6 +917,7 @@ def interactive_review(url, cfg):
 
             if low in ("r", "refresh"):
                 cache.clear()
+                order.clear()
                 print(_style("Refreshing (most recently active first)...", "2"))
                 try:
                     page = 1
@@ -927,9 +948,16 @@ def interactive_review(url, cfg):
 
             num = choice.lstrip("#")
             if not num.isdigit():
-                print("Enter a PR number (#NNN), Enter for more, r, or q.")
+                print("Enter a list position, #NNN for a PR, Enter for more, "
+                      "r, or q.")
                 continue
-            review(int(num))
+            n = int(num)
+            # A bare number in range is a list position (instant from cache);
+            # "#NNN" or an out-of-range number is an explicit PR number.
+            if not choice.startswith("#") and 1 <= n <= len(order):
+                review(order[n - 1])
+            else:
+                review(n)
     finally:
         bg.shutdown(wait=False, cancel_futures=True)
 
