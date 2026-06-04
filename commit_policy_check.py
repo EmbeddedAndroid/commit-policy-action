@@ -27,6 +27,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 
@@ -708,19 +709,24 @@ def parse_pr_url(url):
     return m.group(1), m.group(2), (int(m.group(3)) if m.group(3) else None)
 
 
-def list_open_prs(owner, repo, token, limit=10):
-    url = (f"{_API}/repos/{owner}/{repo}/pulls?state=open&sort=created"
-           f"&direction=desc&per_page={limit}")
+def list_open_prs(owner, repo, token, limit=10, page=1, sort="updated"):
+    """One page of open PRs, most-recently-active first by default.
+
+    The list response already carries head.sha and user.login, so a per-PR
+    metadata fetch is not needed to review them.
+    """
+    url = (f"{_API}/repos/{owner}/{repo}/pulls?state=open&sort={sort}"
+           f"&direction=desc&per_page={limit}&page={page}")
     _, data, _ = _api("GET", url, token)
     return data
 
 
-def review_pr_readonly(owner, repo, pr, token, cfg):
-    slug = f"{owner}/{repo}"
-    _, meta, _ = _api("GET", f"{_API}/repos/{slug}/pulls/{pr}", token)
-    head_sha = (meta.get("head") or {}).get("sha", "")
+def check_pr_item(slug, item, token, cfg):
+    """Run the checker against a PR using a list item as its metadata."""
+    pr = item["number"]
+    head_sha = (item.get("head") or {}).get("sha", "")
+    pr_author = (item.get("user") or {}).get("login") or ""
     commits = load_commits_api(slug, pr, token)
-    pr_author = ((meta.get("user") or {}).get("login")) or ""
     patch_files = (load_patch_files_api(slug, pr, head_sha, token)
                    if cfg.patch_check else [])
     findings = check_all(commits, patch_files, cfg, pr_author)
@@ -728,7 +734,46 @@ def review_pr_readonly(owner, repo, pr, token, cfg):
         findings.append(Finding(
             rule="pr-too-large", severity="warning",
             message="250+ commits; only the first 250 were checked."))
-    return meta, findings
+    return findings
+
+
+def check_pr_items(slug, items, token, cfg, workers=10):
+    """Check a page of PRs concurrently; returns {number: (status, value)}."""
+    out = {}
+    if not items:
+        return out
+    with ThreadPoolExecutor(max_workers=min(workers, len(items))) as ex:
+        futs = {ex.submit(check_pr_item, slug, it, token, cfg): it["number"]
+                for it in items}
+        for fut in as_completed(futs):
+            n = futs[fut]
+            try:
+                out[n] = ("ok", fut.result())
+            except Exception as e:  # one PR failing must not sink the page
+                out[n] = ("err", str(e))
+    return out
+
+
+def review_pr_readonly(owner, repo, pr, token, cfg):
+    slug = f"{owner}/{repo}"
+    _, meta, _ = _api("GET", f"{_API}/repos/{slug}/pulls/{pr}", token)
+    return meta, check_pr_item(slug, meta, token, cfg)
+
+
+def _pr_tag(status, findings):
+    """A fixed-width, colour-coded at-a-glance status tag for a PR line."""
+    if status != "ok":
+        label, code = "[?]", "2"
+    else:
+        e = sum(1 for f in findings if f.severity == "error")
+        w = sum(1 for f in findings if f.severity == "warning")
+        if e:
+            label, code = f"[err {e}]", "1;31"
+        elif w:
+            label, code = f"[warn {w}]", "33"
+        else:
+            label, code = "[ok]", "32"
+    return _style(label.ljust(9), code)
 
 
 def comment_url(owner, repo, pr, finding):
@@ -778,60 +823,115 @@ def render_cli_review(owner, repo, pr, meta, findings):
 def interactive_review(url, cfg):
     token = _token()
     try:
-        owner, repo, pr = parse_pr_url(url)
+        owner, repo, pr0 = parse_pr_url(url)
     except ValueError as e:
         sys.stderr.write(f"{e}\n")
         return 2
+    slug = f"{owner}/{repo}"
     if not token:
         sys.stderr.write("Note: no GITHUB_TOKEN / gh login found; using "
                          "unauthenticated API (low rate limit).\n")
 
-    print(_style(f"commit-policy review (read-only) — {owner}/{repo}", "1"))
-    while True:
-        if pr is None:
+    cache = {}  # number -> (item, status, findings) so re-opening is instant
+    bg = ThreadPoolExecutor(max_workers=1)  # prefetch the next page
+
+    def load_page(page):
+        items = list_open_prs(owner, repo, token, 10, page, "updated")
+        return items, check_pr_items(slug, items, token, cfg)
+
+    def show(items, results, base):
+        for i, it in enumerate(items, base + 1):
+            n = it["number"]
+            status, val = results.get(n, ("err", None))
+            findings = val if status == "ok" else []
+            cache[n] = (it, status, findings)
+            who = (it.get("user") or {}).get("login", "?")
+            when = (it.get("updated_at") or "")[:10]
+            print(f"{_pr_tag(status, findings)} {_style(f'{i:>3}.', '2')} "
+                  f"{_style(f'#{n}', '1')}  {it['title'][:56]}")
+            print(_style(f"{'':>15}by {who} · updated {when}", "2"))
+        return base + len(items)
+
+    def review(n):
+        if n in cache and cache[n][1] == "ok":
+            it, _, findings = cache[n]
+            render_cli_review(owner, repo, n, it, findings)
+            return
+        try:
+            meta, findings = review_pr_readonly(owner, repo, n, token, cfg)
+        except urllib.error.HTTPError as e:
+            sys.stderr.write(f"Could not load PR #{n}: {e.code} {e.reason}\n")
+            return
+        render_cli_review(owner, repo, n, meta, findings)
+
+    try:
+        print(_style(f"\ncommit-policy review (read-only) — {slug}", "1"))
+        if pr0 is not None:        # a direct .../pull/N URL: review it first
+            review(pr0)
+        print(_style("Fetching recent pull requests and checking them in "
+                     "parallel, one moment...", "2"))
+        try:
+            page = 1
+            items, results = load_page(page)
+        except urllib.error.HTTPError as e:
+            sys.stderr.write(f"API error: {e.code} {e.reason}\n")
+            return 1
+        if not items:
+            print("No open pull requests.")
+            return 0
+        shown = show(items, results, 0)
+        prefetch = bg.submit(load_page, page + 1)
+
+        while True:
             try:
-                prs = list_open_prs(owner, repo, token, 10)
-            except urllib.error.HTTPError as e:
-                sys.stderr.write(f"API error: {e.code} {e.reason}\n")
-                return 1
-            if not prs:
-                print("No open pull requests.")
-                return 0
-            print(_style("\nMost recent open pull requests:", "1"))
-            for i, p in enumerate(prs, 1):
-                created = (p.get("created_at") or "")[:10]
-                who = (p.get("user") or {}).get("login", "?")
-                print(f"  {i:2}. #{p['number']:<5} {p['title'][:60]}")
-                print(_style(f"        by {who} on {created}", "2"))
-            try:
-                choice = input("\nSelect 1-10, a PR number (#NNN), or q to quit: ").strip()
+                choice = input(_style(
+                    "\n[Enter] more · #NNN review · r refresh · q quit: ",
+                    "1")).strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 return 0
-            if choice.lower() in ("q", "quit", ""):
-                return 0
-            choice = choice.lstrip("#")
-            if not choice.isdigit():
-                print("Please enter a list index, a PR number, or q.")
-                continue
-            num = int(choice)
-            pr = prs[num - 1]["number"] if 1 <= num <= len(prs) else num
+            low = choice.lower()
 
-        try:
-            meta, findings = review_pr_readonly(owner, repo, pr, token, cfg)
-        except urllib.error.HTTPError as e:
-            sys.stderr.write(f"Could not load PR #{pr}: {e.code} {e.reason}\n")
-            pr = None
-            continue
-        render_cli_review(owner, repo, pr, meta, findings)
-        pr = None
-        try:
-            again = input("\nEnter to browse the list again, or q to quit: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return 0
-        if again.lower() in ("q", "quit"):
-            return 0
+            if low in ("q", "quit"):
+                return 0
+
+            if low in ("r", "refresh"):
+                cache.clear()
+                print(_style("Refreshing (most recently active first)...", "2"))
+                try:
+                    page = 1
+                    items, results = load_page(page)
+                except urllib.error.HTTPError as e:
+                    sys.stderr.write(f"API error: {e.code} {e.reason}\n")
+                    continue
+                shown = show(items, results, 0)
+                prefetch = bg.submit(load_page, page + 1)
+                continue
+
+            if choice == "":   # Enter = load more (continuous scroll)
+                try:
+                    items, results = prefetch.result()
+                except Exception:
+                    try:
+                        items, results = load_page(page + 1)
+                    except urllib.error.HTTPError as e:
+                        sys.stderr.write(f"API error: {e.code} {e.reason}\n")
+                        continue
+                if not items:
+                    print(_style("(no more open pull requests)", "2"))
+                    continue
+                page += 1
+                shown = show(items, results, shown)
+                prefetch = bg.submit(load_page, page + 1)
+                continue
+
+            num = choice.lstrip("#")
+            if not num.isdigit():
+                print("Enter a PR number (#NNN), Enter for more, r, or q.")
+                continue
+            review(int(num))
+    finally:
+        bg.shutdown(wait=False, cancel_futures=True)
 
 
 # --------------------------------------------------------------------------

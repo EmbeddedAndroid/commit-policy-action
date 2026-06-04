@@ -99,12 +99,22 @@ action would do before wiring it into CI:
 python3 commit_policy_check.py https://github.com/qualcomm-linux/meta-qcom/pulls
 ```
 
-It lists the ten most recent open pull requests; pick one (by list number or
-`#NNN`) and it prints the review the action would post, plus a link and the
-ready-to-paste text for each finding so a maintainer can leave the comments by
-hand. Pass a specific pull-request URL (`.../pull/123`) to review it directly.
+It lists open pull requests ten at a time, most-recently-active first, and
+checks them in parallel on load so each line carries an at-a-glance tag
+(`[ok]`, `[warn N]`, `[err N]`). Then:
+
+- press **Enter** to load and check the next ten (the following page is
+  prefetched while you read, so it appears instantly);
+- type **`#NNN`** to review a pull request - it prints the review the action
+  would post plus a link and ready-to-paste text for each finding (already
+  checked ones open instantly from cache);
+- press **`r`** to refresh and re-sort by latest activity;
+- press **`q`** to quit.
+
+Pass a specific pull-request URL (`.../pull/123`) to review it directly first.
 A `GITHUB_TOKEN` or `gh` login is used when present (recommended, to avoid API
-rate limits); public repositories also work unauthenticated.
+rate limits); public repositories also work unauthenticated. Nothing is ever
+posted.
 
 ## Running locally
 
