@@ -522,6 +522,15 @@ def build_review(findings, approve_on_pass=False, guidelines="AGENTS.md"):
     return payload
 
 
+def should_post_review(findings, approve_on_pass=False):
+    """Whether to post a review at all.
+
+    A clean pull request posts nothing - a "passed / no issues" comment is
+    just noise. Set approve_on_pass to post an explicit APPROVE instead.
+    """
+    return bool(findings) or approve_on_pass
+
+
 # --------------------------------------------------------------------------
 # git adapter (local development)
 # --------------------------------------------------------------------------
@@ -849,32 +858,126 @@ def _link(url, label=None):
     return label
 
 
-def render_cli_review(owner, repo, pr, meta, findings):
+# Per-rule phrases that indicate a human reviewer already raised the issue.
+# Heuristic and deliberately on the specific side for the gating rules, to
+# avoid hiding a genuinely new finding. Matched as lowercase substrings.
+RULE_KEYWORDS = {
+    "signoff-missing": ("signed-off-by", "sign-off", "sign off", "signoff",
+                        "dco", "commit -s", "--signoff"),
+    "signoff-malformed": ("signed-off-by", "sign-off", "signoff", "malformed",
+                          "dco"),
+    "signoff-author-mismatch": ("signed-off-by", "sign-off", "dco",
+                                "author email", "match the author"),
+    "kernel-prefix": ("fromlist", "fromgit", "upstream:", "backport:",
+                      "kernel prefix", "drop the prefix", "tree prefix"),
+    "conventional-commit": ("conventional commit", "feat:", "fix(",
+                            "commit message format", "commit prefix",
+                            "semantic commit"),
+    "invalid-component-prefix": ("component prefix", "lowercase",
+                                 "space after the colon", "commit subject",
+                                 "subject prefix", "subject line"),
+    "merge-commit": ("merge commit", "rebase", "don't merge", "do not merge"),
+    "fixup-commit": ("squash", "fixup", "work in progress", "wip commit",
+                     "[wip]"),
+    "webedit-subject": ("web editor", "web ui", "github ui", "web interface"),
+    "identity-webclient": ("noreply", "real name", "real email", "web editor",
+                           "your identity"),
+    "identity-noreply": ("noreply", "real email"),
+    "author-not-submitter": ("authored by", "not the author", "spoof",
+                             "impersonat", "identity"),
+    "unverified-cotrailer": ("acked-by", "reviewed-by", "co-authored",
+                             "tested-by", "trailer", "fabricat"),
+    "subject-too-long": ("too long", "shorten the subject", "72 char",
+                         "50 char", "subject length", "line wrap"),
+    "body-empty": ("explain why", "describe the", "empty commit message",
+                   "no commit message", "real commit message", "message body"),
+    "patch-upstream-status": ("upstream-status", "upstream status"),
+}
+
+
+def already_raised(finding, text):
+    """True if the discussion text looks like a reviewer raised this rule."""
+    return any(kw in text for kw in RULE_KEYWORDS.get(finding.rule, ()))
+
+
+def partition_already_raised(findings, text):
+    """Split findings into (new, already_raised) against discussion text."""
+    new, raised = [], []
+    for f in findings:
+        (raised if (text and already_raised(f, text)) else new).append(f)
+    return new, raised
+
+
+def fetch_discussion_text(slug, pr, token):
+    """Lowercased text of the PR's human comments and reviews.
+
+    Skips this tool's own posted reviews so it does not match itself.
+    """
+    parts = []
+    for path in (f"issues/{pr}/comments", f"pulls/{pr}/comments",
+                 f"pulls/{pr}/reviews"):
+        try:
+            items = _get_all(f"{_API}/repos/{slug}/{path}?per_page=100", token)
+        except (urllib.error.URLError, OSError):
+            continue
+        for it in items:
+            body = it.get("body") or ""
+            if "commit policy check" in body.lower():
+                continue  # our own bot review
+            parts.append(body)
+    return "\n".join(parts).lower()
+
+
+def _finding_line(owner, repo, pr, f):
+    sev = _style("ERROR", "31") if f.severity == "error" else _style("warn", "33")
+    url = comment_url(owner, repo, pr, f)
+    print(f"    [{sev}] {f.rule}: {f.message}")
+    print(f"      open:  {_link(url, _style(url, '36'))}")
+
+
+def render_cli_review(owner, repo, pr, meta, findings, discussion_text=None):
     title = meta.get("title", "")
     author = (meta.get("user") or {}).get("login", "?")
-    errs = sum(1 for f in findings if f.severity == "error")
-    verdict = "REQUEST CHANGES" if errs else ("COMMENT" if findings else "APPROVE / no issues")
     pr_url = f"https://github.com/{owner}/{repo}/pull/{pr}"
+    new, raised = partition_already_raised(findings, discussion_text or "")
+    errs = sum(1 for f in findings if f.severity == "error")
+    warns = sum(1 for f in findings if f.severity == "warning")
+    verdict = ("REQUEST CHANGES" if errs else
+               "COMMENT" if findings else "APPROVE / no issues")
+    note = f" — {len(raised)} already raised by reviewers" if raised else ""
     print()
     print(_link(pr_url, _style(f"PR #{pr}: {title}", "1")))
     print(_style(f"by {author}  |  ", "2") + _link(pr_url, _style(pr_url, "2")))
-    print(_style(f"Verdict the action would post: {verdict}", "1"))
-    print()
-    print(_style("Review body (what the bot would post):", "1"))
-    print("-" * 70)
-    print(render_review_body(findings))
-    print("-" * 70)
+    print(_style(f"Verdict the action would post: {verdict}  "
+                 f"({errs} error(s), {warns} warning(s){note})", "1"))
+
     if not findings:
+        print(_style("No issues found.", "32"))
         return
-    print()
-    print(_style("Suggested comments (paste the text at each link):", "1"))
-    for f in findings:
-        sev = _style("ERROR", "31") if f.severity == "error" else _style("warn", "33")
-        where = f"{f.path}:{f.line}" if f.path else (f.commit or "PR")
-        url = comment_url(owner, repo, pr, f)
-        print(f"\n  [{sev}] {f.rule}  ({where})")
-        print(f"      open:  {_link(url, _style(url, '36'))}")
-        print(f"      paste: {f.message}")
+
+    if new:
+        print(_style("\nIssues not yet raised by reviewers "
+                     "(paste the text at each link):", "1"))
+        groups, files = {}, []
+        for f in new:
+            if f.path:
+                files.append(f)
+            else:
+                groups.setdefault((f.commit, f.subject), []).append(f)
+        for (sha, subject), fs in groups.items():
+            print(f"\n  {_style('commit ' + sha, '1')}  {subject}")
+            for f in fs:
+                _finding_line(owner, repo, pr, f)
+        for f in files:
+            print(f"\n  {_style(f.path, '1')}")
+            _finding_line(owner, repo, pr, f)
+    else:
+        print(_style("\nAll findings were already raised by reviewers; "
+                     "nothing new to add.", "2"))
+
+    if raised:
+        rule_list = ", ".join(sorted({f.rule for f in raised}))
+        print(_style(f"\nAlready raised by reviewers (hidden): {rule_list}", "2"))
 
 
 def resolve_choice(choice, order):
@@ -942,15 +1045,19 @@ def interactive_review(url, cfg):
 
     def review(n):
         if n in cache and cache[n][1] == "ok":
-            it, _, findings = cache[n]
-            render_cli_review(owner, repo, n, it, findings)
-            return
+            meta, _, findings = cache[n]
+        else:
+            try:
+                meta, findings = review_pr_readonly(owner, repo, n, token, cfg)
+            except urllib.error.HTTPError as e:
+                sys.stderr.write(f"Could not load PR #{n}: {e.code} {e.reason}\n")
+                return
+        # Best-effort: hide findings reviewers have already raised.
         try:
-            meta, findings = review_pr_readonly(owner, repo, n, token, cfg)
-        except urllib.error.HTTPError as e:
-            sys.stderr.write(f"Could not load PR #{n}: {e.code} {e.reason}\n")
-            return
-        render_cli_review(owner, repo, n, meta, findings)
+            disc = fetch_discussion_text(slug, n, token)
+        except (urllib.error.URLError, OSError):
+            disc = ""
+        render_cli_review(owner, repo, n, meta, findings, disc)
 
     try:
         print(_style(f"\ncommit-policy review (read-only) — {slug}", "1"))
@@ -1140,9 +1247,12 @@ def main(argv=None):
             sys.stderr.write("--post-review needs --repo, --pr and "
                              "$GITHUB_TOKEN\n")
             return 2
-        payload = build_review(findings, args.approve_on_pass, cfg.guidelines)
-        status, event = post_review(args.repo, args.pr, head_sha, payload, token)
-        sys.stderr.write(f"Posted {event} review (HTTP {status}).\n")
+        if not should_post_review(findings, args.approve_on_pass):
+            sys.stderr.write("No issues found; not posting a review.\n")
+        else:
+            payload = build_review(findings, args.approve_on_pass, cfg.guidelines)
+            status, event = post_review(args.repo, args.pr, head_sha, payload, token)
+            sys.stderr.write(f"Posted {event} review (HTTP {status}).\n")
 
     return 1 if (args.fail_on_error and has_errors(findings)) else 0
 

@@ -434,6 +434,16 @@ def test_review_comments_when_clean():
     assert "no issues found" in payload["body"].lower()
 
 
+def test_clean_pr_posts_nothing():
+    # A clean PR must not post a "passed" review; it is just noise.
+    assert cp.should_post_review([]) is False
+    assert cp.should_post_review([], approve_on_pass=True) is True
+    warn = cp.Finding(rule="body-empty", severity="warning", message="m")
+    err = cp.Finding(rule="kernel-prefix", severity="error", message="m")
+    assert cp.should_post_review([warn]) is True
+    assert cp.should_post_review([err]) is True
+
+
 def test_review_body_uses_custom_guidelines():
     assert "CONTRIBUTING.md" in cp.build_review([], guidelines="CONTRIBUTING.md")["body"]
 

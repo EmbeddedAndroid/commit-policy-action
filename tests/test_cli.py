@@ -188,6 +188,60 @@ def test_parse_pr_url_rejects_non_github():
         cp.parse_pr_url("https://example.com/foo/bar")
 
 
+# --------------------------------------------------------------------------
+# Hiding findings that reviewers already raised.
+# --------------------------------------------------------------------------
+
+def test_already_raised_matches_rule_keywords():
+    f_sob = cp.Finding(rule="signoff-missing", severity="error", message="m")
+    f_kern = cp.Finding(rule="kernel-prefix", severity="error", message="m")
+    text = "please add a signed-off-by line before we can merge"
+    assert cp.already_raised(f_sob, text) is True
+    assert cp.already_raised(f_kern, text) is False
+
+
+def test_partition_already_raised():
+    f_sob = cp.Finding(rule="signoff-missing", severity="error", message="m",
+                       commit="a")
+    f_kern = cp.Finding(rule="kernel-prefix", severity="error", message="m",
+                        commit="a")
+    new, raised = cp.partition_already_raised(
+        [f_kern, f_sob], "you forgot the sign-off")
+    assert [f.rule for f in new] == ["kernel-prefix"]
+    assert [f.rule for f in raised] == ["signoff-missing"]
+
+
+def test_partition_no_discussion_keeps_all():
+    f = cp.Finding(rule="signoff-missing", severity="error", message="m")
+    new, raised = cp.partition_already_raised([f], "")
+    assert new == [f] and raised == []
+
+
+def test_render_hides_already_raised(capsys):
+    raised_f = cp.Finding(rule="signoff-missing", severity="error",
+                          message="Missing sign-off trailer", commit="abc123",
+                          subject="x: y")
+    new_f = cp.Finding(rule="kernel-prefix", severity="error",
+                       message="Drop the FROMLIST prefix", commit="abc123",
+                       subject="x: y")
+    disc = "reviewer said: please add your signed-off-by"
+    cp.render_cli_review("o", "r", 5, _meta(), [raised_f, new_f], disc)
+    out = capsys.readouterr().out
+    assert "kernel-prefix" in out                          # new finding shown
+    assert "1 already raised by reviewers" in out          # verdict note
+    assert "Already raised by reviewers (hidden): signoff-missing" in out
+    assert "Missing sign-off trailer" not in out           # raised text hidden
+
+
+def test_render_all_raised(capsys):
+    f = cp.Finding(rule="signoff-missing", severity="error", message="m",
+                   commit="abc123", subject="x: y")
+    cp.render_cli_review("o", "r", 5, _meta(), [f],
+                         "please add a sign-off")
+    out = capsys.readouterr().out
+    assert "nothing new to add" in out
+
+
 def test_drop_drafts():
     items = [
         {"number": 1, "draft": False},

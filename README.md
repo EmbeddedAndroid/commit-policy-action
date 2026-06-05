@@ -46,6 +46,10 @@ Coverage is held by unit fixtures, property-based fuzzing
 (`corpus_eval.py`, `tests/test_corpus.py`) - so "did it converge" is a number,
 not "did a red-teamer find another string."
 
+On a clean pull request the action posts nothing - there is no "passed"
+comment, only a review when there is something to flag (set `approve-on-pass`
+to post an explicit approval instead).
+
 Semantic judgements - whether the body explains why, whether the subject
 truthfully describes the diff - remain human review.
 
@@ -105,9 +109,11 @@ checks them in parallel on load so each line carries an at-a-glance tag
 
 - press **Enter** to load and check the next ten (the following page is
   prefetched while you read, so it appears instantly);
-- type **`#NNN`** to review a pull request - it prints the review the action
-  would post plus a link and ready-to-paste text for each finding (already
-  checked ones open instantly from cache);
+- type **`#NNN`** (or a list position `N`) to review a pull request - it
+  prints the findings with a link and ready-to-paste text for each, **hiding
+  any a reviewer has already raised** (matched against the pull request's
+  comments and reviews) and showing only what is new plus a summary of what
+  was already covered;
 - press **`r`** to refresh and re-sort by latest activity;
 - press **`q`** to quit.
 
