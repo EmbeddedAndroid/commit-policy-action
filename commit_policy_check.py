@@ -869,13 +869,18 @@ def review_pr_readonly(owner, repo, pr, token, cfg):
     return meta, findings, disc
 
 
-def _pr_tag(status, findings):
-    """A fixed-width, colour-coded at-a-glance status tag for a PR line."""
+def _pr_tag(status, findings, discussion=""):
+    """A fixed-width, colour-coded at-a-glance status tag for a PR line.
+
+    Counts only findings reviewers have NOT already raised, so a PR whose
+    only issue is one a reviewer already flagged reads as [ok].
+    """
     if status != "ok":
         label, code = "[?]", "2"
     else:
-        e = sum(1 for f in findings if f.severity == "error")
-        w = sum(1 for f in findings if f.severity == "warning")
+        new, _ = partition_already_raised(findings, discussion)
+        e = sum(1 for f in new if f.severity == "error")
+        w = sum(1 for f in new if f.severity == "warning")
         if e:
             label, code = f"[err {e}]", "1;31"
         elif w:
@@ -1100,13 +1105,12 @@ def interactive_review(url, cfg):
             findings, disc = val if status == "ok" else ([], "")
             cache[n] = (it, status, findings, disc)
             order.append(n)
-            # Tag reflects only findings reviewers have NOT already raised.
-            new, _ = partition_already_raised(findings, disc)
             who = (it.get("user") or {}).get("login", "?")
             when = (it.get("updated_at") or "")[:10]
             head = _link(f"https://github.com/{slug}/pull/{n}",
                          _style(f"#{n}", "1") + f"  {it['title'][:56]}")
-            print(f"{_pr_tag(status, new)} {_style(f'{i:>3}.', '2')} {head}")
+            print(f"{_pr_tag(status, findings, disc)} "
+                  f"{_style(f'{i:>3}.', '2')} {head}")
             print(_style(f"{'':>15}by {who} · updated {when}", "2"))
         return base + len(items)
 

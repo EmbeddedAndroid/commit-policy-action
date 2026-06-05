@@ -138,6 +138,18 @@ def test_pr_tag_labels():
     assert "[?]" in cp._pr_tag("err", None)             # could not check
 
 
+def test_pr_tag_excludes_already_raised():
+    # The bug: a warning a reviewer already raised still showed as [warn].
+    warn = cp.Finding(rule="subject-too-long", severity="warning",
+                      message="Subject is too long")
+    assert "[warn 1]" in cp._pr_tag("ok", [warn], "")          # not yet raised
+    assert "[ok]" in cp._pr_tag("ok", [warn], "the subject is too long")
+    # an error already raised likewise drops to [ok]
+    err = cp.Finding(rule="signoff-missing", severity="error", message="m")
+    assert "[err 1]" in cp._pr_tag("ok", [err], "")
+    assert "[ok]" in cp._pr_tag("ok", [err], "please add a signed-off-by")
+
+
 # --------------------------------------------------------------------------
 # Clickable URLs (OSC 8 hyperlinks).
 # --------------------------------------------------------------------------
