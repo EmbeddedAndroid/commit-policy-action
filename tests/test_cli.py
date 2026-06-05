@@ -76,6 +76,27 @@ def test_stage_command():
     assert cp.resolve_choice("stage", ORDER) == ("stage",)
 
 
+def test_render_pr_rows(capsys):
+    # 'b' redisplays the list via this; tags reflect already-raised filtering.
+    warn = cp.Finding(rule="subject-too-long", severity="warning", message="m")
+    items = [
+        {"number": 2349, "title": "ci: add evk", "user": {"login": "x"},
+         "updated_at": "2026-06-05T00:00:00Z"},
+        {"number": 2348, "title": "enable thing", "user": {"login": "y"},
+         "updated_at": "2026-06-05T00:00:00Z"},
+    ]
+    results = {2349: ("ok", ([warn], "")), 2348: ("ok", ([], ""))}
+    cp.render_pr_rows("o/r", items, results, 0)
+    out = capsys.readouterr().out
+    assert "#2349" in out and "#2348" in out
+    assert "[warn 1]" in out and "[ok]" in out
+    assert "1." in out and "2." in out          # 1-based positions
+    # already-raised warning tags [ok], not [warn]
+    results2 = {2349: ("ok", ([warn], "the subject is too long"))}
+    cp.render_pr_rows("o/r", items[:1], results2, 0)
+    assert "[ok]" in capsys.readouterr().out
+
+
 def test_build_pending_payload_creates_a_draft():
     pf = cp.Finding(rule="patch-upstream-status", severity="error",
                     message="missing header", path="a/x.patch", line=1)

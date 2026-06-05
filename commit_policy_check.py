@@ -1051,6 +1051,21 @@ def render_cli_review(owner, repo, pr, meta, findings, discussion_text=None):
         print(_style(f"\nAlready raised by reviewers (hidden): {rule_list}", "2"))
 
 
+def render_pr_rows(slug, items, results, base):
+    """Print a page of PR rows with at-a-glance tags (positions start at base+1)."""
+    for i, it in enumerate(items, base + 1):
+        n = it["number"]
+        status, val = results.get(n, ("err", None))
+        findings, disc = val if status == "ok" else ([], "")
+        who = (it.get("user") or {}).get("login", "?")
+        when = (it.get("updated_at") or "")[:10]
+        head = _link(f"https://github.com/{slug}/pull/{n}",
+                     _style(f"#{n}", "1") + f"  {it['title'][:56]}")
+        print(f"{_pr_tag(status, findings, disc)} "
+              f"{_style(f'{i:>3}.', '2')} {head}")
+        print(_style(f"{'':>15}by {who} · updated {when}", "2"))
+
+
 def resolve_choice(choice, order):
     """Map a browse-prompt input to an action (pure, so it is unit-tested).
 
@@ -1097,7 +1112,7 @@ def interactive_review(url, cfg):
 
     cache = {}       # number -> (item, status, findings, disc); re-open instant
     order = []       # PR numbers in display order, so a bare N selects by position
-    history = []     # reviewed PR numbers, for the 'b' back command
+    last_view = {}   # the last shown list page, for the 'b' back-to-list command
     current = {}     # the last reviewed PR, for the 's' stage command
     bg = ThreadPoolExecutor(max_workers=1)  # prefetch the next page
 
@@ -1106,19 +1121,14 @@ def interactive_review(url, cfg):
         return items, check_pr_items(slug, items, token, cfg)
 
     def show(items, results, base):
-        for i, it in enumerate(items, base + 1):
+        for it in items:
             n = it["number"]
             status, val = results.get(n, ("err", None))
             findings, disc = val if status == "ok" else ([], "")
             cache[n] = (it, status, findings, disc)
             order.append(n)
-            who = (it.get("user") or {}).get("login", "?")
-            when = (it.get("updated_at") or "")[:10]
-            head = _link(f"https://github.com/{slug}/pull/{n}",
-                         _style(f"#{n}", "1") + f"  {it['title'][:56]}")
-            print(f"{_pr_tag(status, findings, disc)} "
-                  f"{_style(f'{i:>3}.', '2')} {head}")
-            print(_style(f"{'':>15}by {who} · updated {when}", "2"))
+        render_pr_rows(slug, items, results, base)
+        last_view.update(items=items, results=results, base=base)
         return base + len(items)
 
     def review(n):
@@ -1158,7 +1168,7 @@ def interactive_review(url, cfg):
         while True:
             try:
                 choice = input(_style(
-                    "\n[Enter] more · N/#NNN review · s stage · b back · "
+                    "\n[Enter] more · N/#NNN review · s stage · b list · "
                     "r refresh · q quit: ", "1")).strip()
             except (EOFError, KeyboardInterrupt):
                 print()
@@ -1206,13 +1216,12 @@ def interactive_review(url, cfg):
                 continue
 
             if kind == "back":
-                if len(history) >= 2:
-                    history.pop()                 # drop the current review
-                    review(history[-1])
-                elif history:
-                    review(history[-1])           # only one; re-show it
+                if last_view:                     # back to the list you were on
+                    print()
+                    render_pr_rows(slug, last_view["items"],
+                                   last_view["results"], last_view["base"])
                 else:
-                    print(_style("No previous review.", "2"))
+                    print(_style("Nothing to go back to.", "2"))
                 continue
 
             if kind == "stage":
@@ -1244,10 +1253,7 @@ def interactive_review(url, cfg):
                     print("  " + _link(url, _style(url, "36")))
                 continue
 
-            n = action[1]  # kind == "review"
-            review(n)
-            if not history or history[-1] != n:
-                history.append(n)
+            review(action[1])  # kind == "review"
     finally:
         bg.shutdown(wait=False, cancel_futures=True)
 
