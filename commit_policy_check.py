@@ -164,6 +164,10 @@ WEBEDIT_KNOWN_FILES = frozenset({
 UPSTREAM_STATUS_RE = re.compile(
     r"^Upstream-Status:[ \t]*([A-Za-z-]+)", re.IGNORECASE | re.MULTILINE)
 
+# A cherry-pick / backport marker (git cherry-pick -x). On such a commit the
+# author is legitimately not the PR submitter, so identity is not flagged.
+CHERRY_PICK_RE = re.compile(r"cherry[\s-]*picked from commit", re.IGNORECASE)
+
 # Trailers asserting a person's involvement. Matched by shape - any
 # "Word-by:" trailer (Signed-off-by, Acked-by, Reviewed-by, Approved-by,
 # Endorsed-by, Co-authored-by, ...) - rather than a closed list, so a forged
@@ -359,8 +363,13 @@ def check_commit(commit, cfg=None, pr_author=None):
     # outright authorship spoofing (e.g. committing as a maintainer) shows up
     # here. Unlinked emails resolve to no account ("") and are not flagged, to
     # avoid noise on the common case of committing with an off-GitHub email.
-    if pr_author and commit.author_login and \
-            commit.author_login.lower() != pr_author.lower():
+    # Flag only when the submitter is neither the author nor the committer and
+    # the commit is not a backport: carrying someone else's patch (committing
+    # it and adding your sign-off) and cherry-picks are legitimate.
+    if (pr_author and commit.author_login
+            and commit.author_login.lower() != pr_author.lower()
+            and (commit.committer_login or "").lower() != pr_author.lower()
+            and not CHERRY_PICK_RE.search(commit.message)):
         add("author-not-submitter", "warning",
             f"Commit authored by GitHub user '{commit.author_login}', not the "
             f"pull request submitter '{pr_author}'; confirm the identity.")
@@ -723,6 +732,47 @@ def post_review(repo, pr, head_sha, payload, token):
     raise RuntimeError(f"could not post review: {last_err}")
 
 
+def build_pending_payload(head_sha, findings):
+    """A reviews-API payload with NO event, which creates a PENDING review.
+
+    GitHub cannot pre-fill a comment via a URL, so instead we stage the
+    findings as a draft review owned by the maintainer: the comments show up
+    pre-populated in the PR, and the maintainer edits and submits them.
+    """
+    inline = [{"path": f.path, "line": f.line, "side": "RIGHT", "body": f.message}
+              for f in findings if f.path and f.line]
+    lines = ["Commit policy suggestions (draft - edit or delete any, then "
+             "click Submit review):", ""]
+    by_commit = {}
+    for f in findings:
+        if f.path:
+            continue
+        by_commit.setdefault((f.commit, f.subject), []).append(f)
+    for (sha, subject), fs in by_commit.items():
+        lines.append(f"Commit {sha} ({subject}):")
+        for f in fs:
+            lines.append(f"- {f.severity}, {f.rule}: {f.message}")
+        lines.append("")
+    payload = {"commit_id": head_sha, "body": "\n".join(lines).strip()}
+    if inline:
+        payload["comments"] = inline          # no "event" key => pending review
+    return payload
+
+
+def stage_pending_review(slug, pr, payload, token):
+    """Create a pending (draft) review; fall back to body-only on a bad anchor."""
+    url = f"{_API}/repos/{slug}/pulls/{pr}/reviews"
+    try:
+        _, data, _ = _api("POST", url, token, payload)
+        return data
+    except urllib.error.HTTPError as e:
+        if "comments" in payload and e.code == 422:  # inline position rejected
+            body_only = {k: v for k, v in payload.items() if k != "comments"}
+            _, data, _ = _api("POST", url, token, body_only)
+            return data
+        raise
+
+
 # --------------------------------------------------------------------------
 # Interactive review (read-only maintainer evaluation tool)
 # --------------------------------------------------------------------------
@@ -996,12 +1046,16 @@ def resolve_choice(choice, order):
         return ("quit",)
     if low in ("r", "refresh"):
         return ("refresh",)
+    if low in ("b", "back"):
+        return ("back",)
+    if low in ("s", "stage"):
+        return ("stage",)
     if c == "":
         return ("more",)
     num = c.lstrip("#")
     if not num.isdigit():
         return ("error", "Enter a list position, #NNN for a PR, Enter for "
-                         "more, r, or q.")
+                         "more, s stage, b back, r refresh, or q quit.")
     n = int(num)
     if not c.startswith("#") and 1 <= n <= len(order):
         return ("review", order[n - 1])
@@ -1020,8 +1074,11 @@ def interactive_review(url, cfg):
         sys.stderr.write("Note: no GITHUB_TOKEN / gh login found; using "
                          "unauthenticated API (low rate limit).\n")
 
-    cache = {}  # number -> (item, status, findings) so re-opening is instant
-    order = []  # PR numbers in display order, so a bare N selects by position
+    cache = {}       # number -> (item, status, findings); re-opening is instant
+    order = []       # PR numbers in display order, so a bare N selects by position
+    disc_cache = {}  # number -> discussion text, so 'back' is instant
+    history = []     # reviewed PR numbers, for the 'b' back command
+    current = {}     # the last reviewed PR, for the 's' stage command
     bg = ThreadPoolExecutor(max_workers=1)  # prefetch the next page
 
     def load_page(page):
@@ -1053,11 +1110,18 @@ def interactive_review(url, cfg):
                 sys.stderr.write(f"Could not load PR #{n}: {e.code} {e.reason}\n")
                 return
         # Best-effort: hide findings reviewers have already raised.
-        try:
-            disc = fetch_discussion_text(slug, n, token)
-        except (urllib.error.URLError, OSError):
-            disc = ""
+        disc = disc_cache.get(n)
+        if disc is None:
+            try:
+                disc = fetch_discussion_text(slug, n, token)
+            except (urllib.error.URLError, OSError):
+                disc = ""
+            disc_cache[n] = disc
         render_cli_review(owner, repo, n, meta, findings, disc)
+        current.update(pr=n, meta=meta, findings=findings, disc=disc)
+        if token and partition_already_raised(findings, disc)[0]:
+            print(_style("(press s to stage these as a draft review on your "
+                         "GitHub review queue)", "2"))
 
     try:
         print(_style(f"\ncommit-policy review (read-only) — {slug}", "1"))
@@ -1080,8 +1144,8 @@ def interactive_review(url, cfg):
         while True:
             try:
                 choice = input(_style(
-                    "\n[Enter] more · N or #NNN review · r refresh · q quit: ",
-                    "1")).strip()
+                    "\n[Enter] more · N/#NNN review · s stage · b back · "
+                    "r refresh · q quit: ", "1")).strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 return 0
@@ -1127,7 +1191,49 @@ def interactive_review(url, cfg):
                 prefetch = bg.submit(load_page, page + 1)
                 continue
 
-            review(action[1])  # kind == "review"
+            if kind == "back":
+                if len(history) >= 2:
+                    history.pop()                 # drop the current review
+                    review(history[-1])
+                elif history:
+                    review(history[-1])           # only one; re-show it
+                else:
+                    print(_style("No previous review.", "2"))
+                continue
+
+            if kind == "stage":
+                if not current:
+                    print(_style("Review a PR first, then 's' to stage it.", "2"))
+                    continue
+                if not token:
+                    print(_style("Staging needs a GitHub login (gh auth login "
+                                 "or GITHUB_TOKEN).", "2"))
+                    continue
+                cn = current["pr"]
+                new, _ = partition_already_raised(current["findings"],
+                                                  current["disc"])
+                if not new:
+                    print(_style("Nothing new to stage.", "2"))
+                    continue
+                head_sha = (current["meta"].get("head") or {}).get("sha", "")
+                try:
+                    stage_pending_review(
+                        slug, cn, build_pending_payload(head_sha, new), token)
+                except urllib.error.HTTPError as e:
+                    detail = e.read().decode(errors="replace")[:200]
+                    sys.stderr.write(f"Could not stage review for #{cn}: "
+                                     f"{e.code} {e.reason} {detail}\n")
+                else:
+                    url = f"https://github.com/{slug}/pull/{cn}/files"
+                    print(_style(f"Draft review for #{cn} staged on your GitHub "
+                                 f"review queue. Edit and submit it here:", "32"))
+                    print("  " + _link(url, _style(url, "36")))
+                continue
+
+            n = action[1]  # kind == "review"
+            review(n)
+            if not history or history[-1] != n:
+                history.append(n)
     finally:
         bg.shutdown(wait=False, cancel_futures=True)
 

@@ -65,6 +65,31 @@ def test_garbage_is_an_error_not_a_review():
     assert cp.resolve_choice("12abc", ORDER)[0] == "error"
 
 
+def test_back_command():
+    assert cp.resolve_choice("b", ORDER) == ("back",)
+    assert cp.resolve_choice("back", ORDER) == ("back",)
+    assert cp.resolve_choice(" B ", ORDER) == ("back",)
+
+
+def test_stage_command():
+    assert cp.resolve_choice("s", ORDER) == ("stage",)
+    assert cp.resolve_choice("stage", ORDER) == ("stage",)
+
+
+def test_build_pending_payload_creates_a_draft():
+    pf = cp.Finding(rule="patch-upstream-status", severity="error",
+                    message="missing header", path="a/x.patch", line=1)
+    cf = cp.Finding(rule="kernel-prefix", severity="error",
+                    message="Drop the FROMLIST prefix", commit="abc123",
+                    subject="x: y")
+    p = cp.build_pending_payload("HEADSHA", [pf, cf])
+    assert "event" not in p                       # no event => pending/draft
+    assert p["commit_id"] == "HEADSHA"
+    assert p["comments"][0]["path"] == "a/x.patch"  # patch finding -> inline
+    assert "kernel-prefix" in p["body"]             # commit finding -> body
+    assert "draft" in p["body"].lower()
+
+
 def test_empty_order_falls_back_to_pr_number():
     assert cp.resolve_choice("5", []) == ("review", 5)
 

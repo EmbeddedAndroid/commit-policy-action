@@ -270,6 +270,32 @@ def test_identity_spoof_author_not_submitter():
     assert "author-not-submitter" not in errors(f)  # warning, not a gate
 
 
+def test_backport_cherry_pick_not_flagged():
+    # A backport carries the original author; author != submitter is expected.
+    msg = ("iq-8275-evk: add monaco-ac EVK DTB\n\nbody\n\n"
+           "Signed-off-by: Nirmesh Kumar Singh <nirmesh.singh@oss.qualcomm.com>\n"
+           "(cherry picked from commit 1748139163918774a64a571a7fc9a51009162f6d)")
+    c = commit(msg, author=("Nirmesh Kumar Singh",
+                            "nirmesh.singh@oss.qualcomm.com"),
+               author_login="nkumarsi")
+    assert "author-not-submitter" not in rules(
+        cp.check_commit(c, pr_author="quic-yocto-ci"))
+
+
+def test_carried_patch_committer_is_submitter_not_flagged():
+    # The submitter committed someone else's patch and signed off (DCO-correct).
+    msg = ("ci: Add iq-x7181-evk to LAVA test device lists\n\nbody\n\n"
+           "Signed-off-by: Shoudi Li <shoudil@qti.qualcomm.com>\n"
+           "Signed-off-by: Xueqian Nie <xueqnie@qti.qualcomm.com>")
+    c = commit(msg, author=("Shoudi Li", "shoudil@qti.qualcomm.com"),
+               author_login="shoudil",
+               committer=("Xueqian Nie", "xueqnie@qti.qualcomm.com"),
+               committer_login="xueqnie")
+    f = cp.check_commit(c, pr_author="xueqnie")
+    assert "author-not-submitter" not in rules(f)
+    assert "unverified-cotrailer" not in rules(f)  # committer sign-off is fine
+
+
 def test_identity_self_authored_not_flagged():
     msg = ("qcom-distro: enable a feature\n\nwhy\n\n"
            "Signed-off-by: Dev <dev@oss.qualcomm.com>")

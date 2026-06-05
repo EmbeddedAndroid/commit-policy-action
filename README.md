@@ -114,6 +114,11 @@ checks them in parallel on load so each line carries an at-a-glance tag
   any a reviewer has already raised** (matched against the pull request's
   comments and reviews) and showing only what is new plus a summary of what
   was already covered;
+- press **`s`** to stage the current pull request's new findings as a draft
+  review on your GitHub review queue (when authenticated) - GitHub cannot
+  pre-fill a comment via a URL, so it stages a pending review you then edit
+  and submit under your own account;
+- press **`b`** to go back to the previous review;
 - press **`r`** to refresh and re-sort by latest activity;
 - press **`q`** to quit.
 
