@@ -821,7 +821,12 @@ def list_open_prs(owner, repo, token, limit=10, page=1, sort="updated"):
 
 
 def check_pr_item(slug, item, token, cfg):
-    """Run the checker against a PR using a list item as its metadata."""
+    """Check a PR and load its discussion; returns (findings, discussion_text).
+
+    Fetching the discussion here means the list tags can reflect only the
+    findings reviewers have NOT already raised, and opening the PR (and going
+    back to it) reuses the cached discussion instead of fetching again.
+    """
     pr = item["number"]
     head_sha = (item.get("head") or {}).get("sha", "")
     pr_author = (item.get("user") or {}).get("login") or ""
@@ -833,7 +838,11 @@ def check_pr_item(slug, item, token, cfg):
         findings.append(Finding(
             rule="pr-too-large", severity="warning",
             message="250+ commits; only the first 250 were checked."))
-    return findings
+    try:
+        disc = fetch_discussion_text(slug, pr, token)
+    except (urllib.error.URLError, OSError):
+        disc = ""
+    return findings, disc
 
 
 def check_pr_items(slug, items, token, cfg, workers=6):
@@ -856,7 +865,8 @@ def check_pr_items(slug, items, token, cfg, workers=6):
 def review_pr_readonly(owner, repo, pr, token, cfg):
     slug = f"{owner}/{repo}"
     _, meta, _ = _api("GET", f"{_API}/repos/{slug}/pulls/{pr}", token)
-    return meta, check_pr_item(slug, meta, token, cfg)
+    findings, disc = check_pr_item(slug, meta, token, cfg)
+    return meta, findings, disc
 
 
 def _pr_tag(status, findings):
@@ -964,8 +974,7 @@ def fetch_discussion_text(slug, pr, token):
     Skips this tool's own posted reviews so it does not match itself.
     """
     parts = []
-    for path in (f"issues/{pr}/comments", f"pulls/{pr}/comments",
-                 f"pulls/{pr}/reviews"):
+    for path in (f"issues/{pr}/comments", f"pulls/{pr}/reviews"):
         try:
             items = _get_all(f"{_API}/repos/{slug}/{path}?per_page=100", token)
         except (urllib.error.URLError, OSError):
@@ -1074,9 +1083,8 @@ def interactive_review(url, cfg):
         sys.stderr.write("Note: no GITHUB_TOKEN / gh login found; using "
                          "unauthenticated API (low rate limit).\n")
 
-    cache = {}       # number -> (item, status, findings); re-opening is instant
+    cache = {}       # number -> (item, status, findings, disc); re-open instant
     order = []       # PR numbers in display order, so a bare N selects by position
-    disc_cache = {}  # number -> discussion text, so 'back' is instant
     history = []     # reviewed PR numbers, for the 'b' back command
     current = {}     # the last reviewed PR, for the 's' stage command
     bg = ThreadPoolExecutor(max_workers=1)  # prefetch the next page
@@ -1089,34 +1097,29 @@ def interactive_review(url, cfg):
         for i, it in enumerate(items, base + 1):
             n = it["number"]
             status, val = results.get(n, ("err", None))
-            findings = val if status == "ok" else []
-            cache[n] = (it, status, findings)
+            findings, disc = val if status == "ok" else ([], "")
+            cache[n] = (it, status, findings, disc)
             order.append(n)
+            # Tag reflects only findings reviewers have NOT already raised.
+            new, _ = partition_already_raised(findings, disc)
             who = (it.get("user") or {}).get("login", "?")
             when = (it.get("updated_at") or "")[:10]
             head = _link(f"https://github.com/{slug}/pull/{n}",
                          _style(f"#{n}", "1") + f"  {it['title'][:56]}")
-            print(f"{_pr_tag(status, findings)} {_style(f'{i:>3}.', '2')} {head}")
+            print(f"{_pr_tag(status, new)} {_style(f'{i:>3}.', '2')} {head}")
             print(_style(f"{'':>15}by {who} · updated {when}", "2"))
         return base + len(items)
 
     def review(n):
         if n in cache and cache[n][1] == "ok":
-            meta, _, findings = cache[n]
+            meta, _, findings, disc = cache[n]
         else:
             try:
-                meta, findings = review_pr_readonly(owner, repo, n, token, cfg)
+                meta, findings, disc = review_pr_readonly(
+                    owner, repo, n, token, cfg)
             except urllib.error.HTTPError as e:
                 sys.stderr.write(f"Could not load PR #{n}: {e.code} {e.reason}\n")
                 return
-        # Best-effort: hide findings reviewers have already raised.
-        disc = disc_cache.get(n)
-        if disc is None:
-            try:
-                disc = fetch_discussion_text(slug, n, token)
-            except (urllib.error.URLError, OSError):
-                disc = ""
-            disc_cache[n] = disc
         render_cli_review(owner, repo, n, meta, findings, disc)
         current.update(pr=n, meta=meta, findings=findings, disc=disc)
         if token and partition_already_raised(findings, disc)[0]:
