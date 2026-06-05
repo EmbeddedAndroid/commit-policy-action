@@ -381,6 +381,20 @@ def test_invalid_component_prefix(subj):
     assert "invalid-component-prefix" in errors(f)
 
 
+@pytest.mark.parametrize("subj,token,fixed", [
+    ("Camera: Create new recipe", "Camera", "camera: Create new recipe"),
+    ("qwes:Migrate prebuilts", "qwes", "qwes: Migrate prebuilts"),
+    ("FOO.BAR: do a thing", "FOO.BAR", "foo.bar: do a thing"),
+], ids=["capitalised", "no-space", "upper"])
+def test_invalid_component_prefix_message(subj, token, fixed):
+    f = cp.check_commit(commit(
+        subj + "\n\nb\n\nSigned-off-by: Dev <dev@oss.qualcomm.com>",
+        author=("Dev", "dev@oss.qualcomm.com")))
+    msg = [x.message for x in f if x.rule == "invalid-component-prefix"][0]
+    assert token in msg          # the component they actually used
+    assert fixed in msg          # the corrected form to copy
+
+
 @pytest.mark.parametrize("subj", [
     "linux-qcom: enable thing",          # canonical component
     "ci/qcom-distro: fix the build",     # component with a slash

@@ -138,10 +138,11 @@ CC_TYPE_RE = re.compile(
 KERNEL_PREFIX_RE = re.compile(
     r"^(FROMLIST|FROMGIT|UPSTREAM|BACKPORT)\s*:", re.IGNORECASE)
 
-# A "prefix attempt": a non-space, non-colon run immediately followed by a
-# colon at the start of the subject. A bare imperative whose summary merely
-# contains a colon (e.g. 'Revert "foo: bar"') has no such leading token.
-PREFIX_ATTEMPT_RE = re.compile(r"^[^\s:]+:")
+# A "prefix attempt": a non-space, non-colon run (captured) immediately
+# followed by a colon at the start of the subject. A bare imperative whose
+# summary merely contains a colon (e.g. 'Revert "foo: bar"') has no such
+# leading token.
+PREFIX_ATTEMPT_RE = re.compile(r"^([^\s:]+):")
 # The single canonical good shape: a lowercase component, colon, then a space.
 # A prefix attempt that does not match this (capitalised, missing space, stray
 # punctuation) is caught by one positive check instead of many blacklists.
@@ -287,9 +288,15 @@ def check_commit(commit, cfg=None, pr_author=None):
                 f"Drop the kernel-tree prefix '{norm.split(':', 1)[0]}:'; use "
                 f"a 'component: summary' subject.")
         elif PREFIX_ATTEMPT_RE.match(norm) and not COMPONENT_CANONICAL_RE.match(norm):
+            pm = PREFIX_ATTEMPT_RE.match(norm)
+            token = pm.group(1)
+            summary = norm[pm.end():].lstrip()
+            suggestion = f"{token.lower()}: {summary}".rstrip()
+            if len(suggestion) > 60:
+                suggestion = suggestion[:57].rstrip() + "..."
             add("invalid-component-prefix", "error",
-                "The text before the colon must be a lowercase component name "
-                "followed by a space (e.g. 'linux-qcom: ...').")
+                f"Component prefix '{token}' is not valid; use a lowercase "
+                f"component and a space after the colon, e.g. '{suggestion}'.")
 
         if FIXUP_RE.match(subject) or WIP_RE.match(subject):
             add("fixup-commit", "error",
