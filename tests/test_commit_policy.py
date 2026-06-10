@@ -396,6 +396,31 @@ def test_invalid_component_prefix_message(subj, token, fixed):
 
 
 @pytest.mark.parametrize("subj", [
+    "AGENTS.md: document the enforced commit conventions",
+    "README.md: fix a broken link",
+    "Makefile: add a clean target",
+    "Dockerfile: pin the base image",
+], ids=["agents", "readme", "makefile", "dockerfile"])
+def test_filename_component_prefix_allowed(subj):
+    # Real files are legitimately capitalised; the repo uses "AGENTS.md:".
+    f = cp.check_commit(commit(
+        subj + "\n\nb\n\nSigned-off-by: Dev <dev@oss.qualcomm.com>",
+        author=("Dev", "dev@oss.qualcomm.com")))
+    assert "invalid-component-prefix" not in errors(f)
+
+
+def test_filename_component_still_needs_space():
+    # The capitalisation is fine, but the space after the colon is still required.
+    f = cp.check_commit(commit(
+        "AGENTS.md:document the change\n\nb\n\n"
+        "Signed-off-by: Dev <dev@oss.qualcomm.com>",
+        author=("Dev", "dev@oss.qualcomm.com")))
+    assert "invalid-component-prefix" in errors(f)
+    msg = [x.message for x in f if x.rule == "invalid-component-prefix"][0]
+    assert "AGENTS.md: document" in msg          # keeps the filename's case
+
+
+@pytest.mark.parametrize("subj", [
     "linux-qcom: enable thing",          # canonical component
     "ci/qcom-distro: fix the build",     # component with a slash
     "debug.yml: enable ftrace",          # component with a dot

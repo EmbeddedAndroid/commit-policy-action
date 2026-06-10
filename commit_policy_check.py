@@ -234,6 +234,27 @@ def is_webedit_subject(subject):
     return False
 
 
+def looks_like_filename(token):
+    """True when a component token names a real file (so it may be capitalised).
+
+    Files like AGENTS.md, README.md, Makefile and Dockerfile are legitimately
+    capitalised and are used as commit subject prefixes, unlike an ordinary
+    word component (Camera, Weston), which must be lowercase.
+    """
+    return (bool(re.search(r"\.[a-z0-9]+$", token))     # AGENTS.md, base.lock
+            or token.lower() in WEBEDIT_KNOWN_FILES)    # Makefile, Dockerfile
+
+
+def component_ok(norm):
+    """True when the subject's component prefix is acceptable: the canonical
+    lowercase 'component: summary', or a filename component (still requiring
+    the space after the colon)."""
+    if COMPONENT_CANONICAL_RE.match(norm):
+        return True
+    m = re.match(r"^([^\s:]+): \S", norm)
+    return bool(m) and looks_like_filename(m.group(1))
+
+
 def body_is_empty(commit):
     """True when the commit has no real body (only blank lines / trailers)."""
     trailer = re.compile(r"^[A-Za-z][A-Za-z-]+:\s")
@@ -287,11 +308,14 @@ def check_commit(commit, cfg=None, pr_author=None):
             add("kernel-prefix", "error",
                 f"Drop the kernel-tree prefix '{norm.split(':', 1)[0]}:'; use "
                 f"a 'component: summary' subject.")
-        elif PREFIX_ATTEMPT_RE.match(norm) and not COMPONENT_CANONICAL_RE.match(norm):
+        elif PREFIX_ATTEMPT_RE.match(norm) and not component_ok(norm):
             pm = PREFIX_ATTEMPT_RE.match(norm)
             token = pm.group(1)
             summary = norm[pm.end():].lstrip()
-            suggestion = f"{token.lower()}: {summary}".rstrip()
+            # A filename component keeps its case (AGENTS.md); an ordinary
+            # word is lowercased (Camera -> camera).
+            fixed = token if looks_like_filename(token) else token.lower()
+            suggestion = f"{fixed}: {summary}".rstrip()
             if len(suggestion) > 60:
                 suggestion = suggestion[:57].rstrip() + "..."
             add("invalid-component-prefix", "error",
